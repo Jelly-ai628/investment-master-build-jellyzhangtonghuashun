@@ -1,7 +1,7 @@
 import pytest
 
 from market_research.connections import ProbeError
-from market_research.insights import InsightSelection, candidates, render_selection
+from market_research.insights import InsightSelection, candidates, full_text, render_selection
 
 
 def sample():
@@ -59,10 +59,11 @@ def test_valuation_and_events_are_bounded_claims():
     insights, tensions = candidates(data)
     valuation = next(item for item in insights.values() if item["dimension"] == "估值")
     assert "12.35倍" in valuation["text"] and "市净率（PB）未通过核验" in valuation["text"]
-    assert "高位或低位" in valuation["text"] and valuation["evidence_ids"] == ["val"]
+    # What the figure cannot show is kept as a caveat, so the writer says it once instead of every sentence repeating it.
+    assert "高位或低位" in valuation["caveat"] and "高位或低位" not in valuation["text"] and valuation["evidence_ids"] == ["val"]
     events = next(item for item in insights.values() if item["dimension"] == "重要事件")
-    assert "计划不等于已经实施" in events["text"] and "不能证明" in events["text"]
-    assert "估值缺少历史分位" in tensions["evidence_gaps"]["text"]
+    assert "计划不等于已经实施" in events["text"] and "不能证明" in full_text(events)
+    assert "估值只有当前水平" in tensions["evidence_gaps"]["text"]
 
 
 def test_history_and_risk_are_separate_evidence_kinds():
@@ -87,7 +88,7 @@ def test_range_position_describes_closing_range_only():
     # closes 100, 110, 90, 95: last 95 sits 25% up the 90-110 range.
     assert "最低90.00点、最高110.00点" in text and "自低到高的25%处" in text
     assert "较区间最高收盘-13.64%" in text and "较最低收盘+5.56%" in text
-    assert "不是支撑位或压力位" in text and insights["range_0"]["dimension"] == "行情结构"
+    assert "不是支撑位或压力位" in full_text(insights["range_0"]) and insights["range_0"]["dimension"] == "行情结构"
     flat = sample()
     flat["ev_index"]["data"]["series"] = [{"date": "2026-09-29", "close": 1}, {"date": "2026-09-30", "close": 1}]
     assert "range_0" not in candidates(flat)[0]
@@ -102,8 +103,8 @@ def test_turnover_trend_needs_six_days_and_is_exact():
     item = candidates(data)[0]["turnover_trend"]
     # Last five average 132; six-day average 126.67; expansions on 24, 26, 29, 30.
     assert "日均成交额132亿元" in item["text"] and "日均127亿元的104.2%" in item["text"]
-    assert "有4天较前一日放大" in item["text"] and "5000至5030只" in item["text"]
-    assert "不代表资金净流入" in item["text"] and item["dimension"] == "流动性"
+    assert "有4天较前一日放大" in item["text"] and "5000至5030只" in item["caveat"]
+    assert "不代表资金净流入" in item["caveat"] and item["dimension"] == "流动性"
 
 
 def test_full_overview_selection_fits_the_detail_limit():

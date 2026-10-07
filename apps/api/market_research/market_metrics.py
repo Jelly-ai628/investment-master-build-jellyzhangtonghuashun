@@ -111,12 +111,24 @@ def market_breadth(pages: list[dict], bars: list[dict], expected_day: str) -> di
     }
 
 
-def index_metrics(rows: list[dict], *, expected_days: list[str], window: int) -> dict:
+def index_metrics(rows: list[dict], *, expected_days: list[str], window: int, allow_gaps: bool = False) -> dict:
     if not rows:
         raise ProbeError("empty_index_history")
     ordered = sorted(rows, key=lambda row: row["date_ms"])
     dates = [datetime.fromtimestamp(row["date_ms"] / 1000, SHANGHAI).date().isoformat() for row in ordered]
-    if dates != expected_days or len(set(dates)) != len(dates):
+    if len(set(dates)) != len(dates):
+        raise ProbeError("incomplete_index_history")
+    missing, requested = [], window
+    if allow_gaps:
+        # A stock may be suspended or newly listed: missing sessions are reported, never filled in.
+        if not set(dates) <= set(expected_days):
+            raise ProbeError("unexpected_bar_date")
+        window_days = expected_days[-window - 1:]
+        missing = [day for day in window_days if day not in dates]
+        if sum(day in window_days for day in dates) < max(3, (window + 1) // 2):
+            raise ProbeError("insufficient_stock_history")
+        window = sum(day >= window_days[0] for day in dates) - 1
+    elif dates != expected_days:
         raise ProbeError("incomplete_index_history")
     closes = [row.get("close_price") for row in ordered]
     if any(not number(value) or value <= 0 for value in closes):
@@ -128,7 +140,7 @@ def index_metrics(rows: list[dict], *, expected_days: list[str], window: int) ->
     for value in chosen:
         peak = max(peak, value)
         max_drawdown = min(max_drawdown, (value / peak - 1) * 100)
-    return {"start_date": dates[-window - 1], "end_date": dates[-1], "return_intervals": window,
+    return {"start_date": dates[-window - 1], "end_date": dates[-1], "return_intervals": requested, "missing_dates": missing,
             "window_return_pct": (chosen[-1] / chosen[0] - 1) * 100,
             "max_drawdown_pct": max_drawdown, "last_close": closes[-1],
             "ma20": mean(closes[-20:]) if len(closes) >= 20 else None,

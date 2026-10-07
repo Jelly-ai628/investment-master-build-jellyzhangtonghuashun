@@ -8,7 +8,7 @@ import type { Evidence } from './types'
 
 echarts.use([LineChart, BarChart, GridComponent, LegendComponent, TooltipComponent, DataZoomComponent, AriaComponent, CanvasRenderer])
 const palette = ['#547564', '#6a9bcc', '#d97757', '#8b7cb6']
-export function Chart({ evidence, onSource }: { evidence: Evidence[]; onSource: (e: Evidence) => void }) {
+export function Chart({ evidence, onSource, initial }: { evidence: Evidence[]; onSource: (e: Evidence) => void; initial?: 'indices' | 'breadth' | 'sectors' }) {
   const container = useRef<HTMLDivElement>(null)
   const [table, setTable] = useState(false)
   const indices = evidence.filter(e => e.kind === 'index_history')
@@ -16,7 +16,7 @@ export function Chart({ evidence, onSource }: { evidence: Evidence[]; onSource: 
   const breadth = evidence.find(e => e.kind === 'market_breadth' && e.data.quality !== 'insufficient_coverage')
   const ranking = evidence.find(e => e.kind === 'sector_ranking')
   const leaders = ranking?.data.ranking?.slice(0, 10) || []
-  const [view, setView] = useState<'indices' | 'breadth' | 'sectors'>(ranking ? 'sectors' : indices.length ? 'indices' : 'breadth')
+  const [view, setView] = useState<'indices' | 'breadth' | 'sectors'>(initial || (ranking ? 'sectors' : indices.length ? 'indices' : 'breadth'))
   const labels = view === 'sectors' ? leaders.map(row => row.name) : view === 'indices' ? indices[0]?.data.series?.map(x => x.date) || [] : ['上涨', '下跌', '平盘']
   const option = useMemo(() => {
     if (view === 'sectors') return {

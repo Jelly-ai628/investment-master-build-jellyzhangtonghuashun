@@ -1,4 +1,4 @@
-# 市场状态研究 v2
+# 市场状态研究 v3
 
 ## 适用问题
 
@@ -32,6 +32,6 @@
 ## 选择与排序
 
 - 摘要先回答"方向和参与度是否一致"（index_*、participation），再给最关键的限制。
-- 区间方向与末日宽度方向相反时，主要矛盾优先选 different_windows；成交活跃度与价格方向不一致时选 activity_vs_price；方向都一致时选 evidence_gaps。
+- 主要矛盾优先选数据之间的背离：指数走弱而上涨占比不低时选 price_vs_breadth；涨跌停分布与指数方向相反时选 sentiment_vs_price；缩量下跌、放量下跌或缩量上涨时选 activity_vs_price。都没有时，区间方向与末日宽度时间尺度不同选 different_windows，驱动未核实选 evidence_gaps。
 - 区间位置（range_*）和成交节奏（turnover_trend）用来补充"过程"和"势"，放在对应维度的方向性观点之后。
 - 口径说明（coverage）放在展开末尾，不进摘要，除非覆盖不足本身就是答案。

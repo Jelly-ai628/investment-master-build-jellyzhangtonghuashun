@@ -33,6 +33,7 @@ def test_skills_only_name_registered_tools_and_existing_ids():
         for identifier in re.findall(r"\b([a-z]+(?:_[a-z]+)*)_\*", text):
             assert f'"{identifier}_"' in insights, (path.name, identifier)
         for identifier in ("participation", "coverage", "comparison", "turnover_trend", "sector_leaders", "sector_coverage",
-                           "different_windows", "activity_vs_price", "evidence_gaps", "sector_ranking_scope", "stock_vs_market"):
+                           "different_windows", "activity_vs_price", "evidence_gaps", "sector_ranking_scope", "stock_vs_market",
+                           "price_vs_breadth", "sentiment_vs_price", "divergence"):
             if re.search(rf"\b{identifier}\b", text):
                 assert f'"{identifier}"' in insights, (path.name, identifier)

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
+import re
 import time
 from urllib.parse import urlparse
 
@@ -17,6 +18,19 @@ from .ifind_runtime import call_ifind, single_valuation, news_records
 from .sector_ranking import rank_sectors
 
 INDICES = {"000300.SH": "沪深300", "000905.SH": "中证500", "000852.SH": "中证1000", "000001.SH": "上证指数", "399006.SZ": "创业板指"}
+
+
+# Exchange short names carry status prefixes (XD ex-dividend, XR ex-rights, DR both, N/C new listing) and suffixes (-U, -W) that are not part of the name.
+MARKERS = re.compile(r"^(?:XD|XR|DR|N|C)(?=[\u4e00-\u9fa5*])|-(?:U|W|UW)$")
+
+
+def short_name(name: str) -> str:
+    return MARKERS.sub("", re.sub(r"\s", "", name)).upper()
+
+
+def names_agree(wanted: str, listed: str) -> bool:
+    listed = short_name(listed)
+    return wanted in listed or (len(listed) >= 3 and listed in wanted)
 
 
 def private_json(path: Path, data: dict):
@@ -41,6 +55,7 @@ class MarketData:
         self.index_names = dict(INDICES)
         self.industry_names = {}
         self.securities = {}
+        self.matches, self.ambiguous = {}, {}
         self.index_results = {}
         self.on_progress = None
 
@@ -72,20 +87,74 @@ class MarketData:
         self.evidence[item["id"]] = item
         return item
 
-    async def resolve_security(self, entity: str) -> str:
-        # Exact name, ticker or thscode only: a fuzzy hit must not silently become a different company.
-        rows = fuyao_items(await request_json(self.client, "GET", FUYAO + "/api/meta/tickers/search", headers=self.headers,
-                                            params={"q": entity, "asset_type": "a-share", "limit": 10}))
-        wanted = entity.strip().upper()
-        matches = {row["thscode"]: row["name"] for row in rows if row.get("asset_type") == "a-share" and isinstance(row.get("thscode"), str)
-                   and isinstance(row.get("name"), str) and wanted in (row["name"].upper(), str(row.get("ticker")), row["thscode"].upper())}
+    async def search_stocks(self, query: str, typed: bool = True) -> list[dict]:
+        params = {"q": query, "limit": 20, **({"asset_type": "a-share"} if typed else {})}
+        try:
+            rows = fuyao_items(await request_json(self.client, "GET", FUYAO + "/api/meta/tickers/search", headers=self.headers, params=params))
+        except ProbeError as error:
+            # An empty search is an answer ("not found"), not a provider failure.
+            if error.category == "empty_data":
+                return []
+            raise
+        return [row for row in rows if row.get("asset_type") == "a-share" and isinstance(row.get("thscode"), str) and isinstance(row.get("name"), str)]
+
+    async def listed_code(self, ticker: str) -> str | None:
+        # Confirms only that a six-digit code is a listed A-share in the provider's snapshot universe, not which company it is.
+        suffixes = {"6": ["SH"], "0": ["SZ"], "3": ["SZ"], "4": ["BJ"], "8": ["BJ"], "9": ["BJ", "SH"]}.get(ticker[0], [])
+        codes = [ticker + "." + suffix for suffix in suffixes]
+        if not codes:
+            return None
+        try:
+            rows = fuyao_items(await request_json(self.client, "GET", FUYAO + "/api/a-share/prices/snapshot", headers=self.headers, params={"thscodes": ",".join(codes)}))
+        except ProbeError as error:
+            if error.category in ("empty_data", "instrument_not_found"):
+                return None
+            raise
+        found = [row["thscode"] for row in rows if row.get("thscode") in codes]
+        return found[0] if len(found) == 1 else None
+
+    async def resolve_security(self, entity: str, hint: str | None = None) -> str:
+        # Every accepted code comes from the provider's code table; how it was matched is recorded and shown to the user.
+        wanted = re.sub(r"\s", "", entity).upper()
+        rows = await self.search_stocks(entity) or await self.search_stocks(entity, typed=False)
+        via = "名称或代码检索"
+        if not rows and len(wanted) >= 4 and not wanted.isdigit():
+            # The table holds exchange short names, which can be cut to four characters with a prefix ("XD中国移"), so a full name finds nothing.
+            rows = await self.search_stocks(wanted[:3])
+            via = "名称前几个字检索并核对简称"
+        unverified = None
+        if not rows and hint and re.fullmatch(r"\d{6}", hint):
+            # The model may know the ticker of a well-known name; the provider's own name for that ticker must agree.
+            listed = [row for row in await self.search_stocks(hint) + await self.search_stocks(hint, typed=False)
+                      if str(row.get("ticker")) == hint or row["thscode"].startswith(hint + ".")]
+            rows = [row for row in listed if names_agree(wanted, row["name"])]
+            via = "按代码" + hint + "检索并核对名称"
+            if not listed:
+                # Live 2026-10-07: neither "中国移动" nor its ticker came back from the search, although the market snapshot lists the code.
+                unverified = await self.listed_code(hint)
+        if unverified:
+            self.securities[unverified] = entity
+            self.index_names[unverified] = entity
+            self.matches[unverified] = {"query": entity, "name": entity, "code": unverified, "exact": False, "name_verified": False,
+                                        "via": f"DeepSeek给出的代码{hint}（扶摇行情快照中有该代码，但代码表检索没有返回名称，未能核对是否就是“{entity}”）"}
+            return unverified
+        exact = {row["thscode"]: row["name"] for row in rows if wanted in (short_name(row["name"]), row["name"].upper(), str(row.get("ticker")), row["thscode"].upper())}
+        partial = {row["thscode"]: row["name"] for row in rows if names_agree(wanted, row["name"])}
+        matches = exact or partial
         if not matches:
             raise ProbeError("security_not_resolved")
         if len(matches) > 1:
+            self.ambiguous[entity] = list(matches.values())[:4]
             raise ProbeError("ambiguous_security")
-        code, name = next(iter(matches.items()))
+        code, listed_name = next(iter(matches.items()))
+        # A truncated or marked short name ("XD中国移") is shown under the name the user gave, with the table's own name kept in the match note.
+        marked = short_name(listed_name) != listed_name.upper()
+        truncated = len(short_name(listed_name)) < len(wanted) and short_name(listed_name) in wanted
+        name = entity.strip() if marked or truncated else listed_name
         self.securities[code] = name
         self.index_names[code] = name
+        self.matches[code] = {"query": entity, "name": name, "code": code, "listed_name": listed_name, "exact": bool(exact) and name == listed_name,
+                              "via": via + ("" if name == listed_name else f"（代码表简称为“{listed_name}”）")}
         return code
 
     async def get_index_history(self, code: str, window: int = 20) -> dict:
@@ -110,7 +179,7 @@ class MarketData:
         rows = fuyao_items(body)
         if stock and (body.get("data") or {}).get("adjust") != "forward":
             raise ProbeError("stock_adjustment_unverified")
-        calculated = index_metrics(rows, expected_days=[day.date().isoformat() for day in days], window=window)
+        calculated = index_metrics(rows, expected_days=[day.date().isoformat() for day in days], window=window, allow_gaps=stock)
         calculated.update({"code": code, "name": self.index_names[code], "instrument_type": "stock" if stock else "industry" if code not in INDICES else "index"})
         if stock:
             calculated.update({"unit": "元（前复权）", "return_basis": "前复权收盘价首末之比，按供应商口径处理除权除息；不是未来收益预测。"})

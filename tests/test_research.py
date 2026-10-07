@@ -44,7 +44,7 @@ def stock_fixture(fetched, known):
             pass
         async def load_industries(self):
             return {"白酒": "881125.TI"}
-        async def resolve_security(self, entity):
+        async def resolve_security(self, entity, hint=None):
             if entity not in known:
                 raise ProbeError("security_not_resolved")
             self.securities[known[entity]] = "贵州茅台"
@@ -202,37 +202,51 @@ def test_agent_plans_calls_and_only_renders_verified_selections(tmp_path, monkey
     assert dimensions["重要事件"] == "已调用，未通过核验（news_original_not_verified）"
     assert dimensions["情绪"] == "已调用，未通过核验（sentiment_date_link_unverified）"
     if valuation_ok:
-        # The model did not select the valuation insight; verified framework dimensions are still shown.
-        assert [item["dimension"] for item in result["narrative"]["interpretations"]][-1] == "估值"
+        # The model did not select the valuation insight; it is listed apart from the answer instead of padding it.
+        assert [item["dimension"] for item in result["narrative"]["supplements"]] == ["估值"]
+        assert "估值" not in [item["dimension"] for item in result["narrative"]["interpretations"]]
         assert "估值" not in " ".join(result["confidence"]["reasons"])
     planning_tools = {tool["function"]["name"] for tool in calls[1]["tools"]}
     assert {"get_valuation_context", "get_event_context", "get_risk_context"} <= planning_tools
     if invalid_selection:
         assert result["status"] == "facts_only" and result["narrative"] is None
-        assert len(calls) == 4
+        # intent + planning + three rejected narrative drafts + two rejected selections
+        assert len(calls) == 7
     else:
         assert result["status"] == "completed_with_limits"
         assert result["narrative"]["summary_evidence_ids"] == ["i"]
-        assert "首末点位变化为-5.00%" in result["narrative"]["summary"]
-        assert len(calls) == 3
+        assert "首末点位变化-5.00%" in result["narrative"]["summary"]
+        # The mock never writes a narrative, so every draft is rejected and the ID selection is the fallback.
+        assert len(calls) == 6 and result["narrative"]["author"] == "selection"
+        assert sum(e["type"] == "validation_retry" and e["reason"] == "narrative_unverified" for e in result["events"]) == 3
         assert result["selected_insights"]["dropped_unknown_ids"] == (["different_windows"] if valuation_ok else [])
 
 
 @pytest.mark.parametrize("adjust", ["forward", None])
-def test_stock_lookup_is_exact_and_prices_must_be_forward_adjusted(tmp_path, adjust):
+def test_stock_lookup_uses_the_code_table_and_prices_must_be_forward_adjusted(tmp_path, adjust):
     from datetime import datetime, timedelta
     from market_research.connections import SHANGHAI
     from market_research.market_data import MarketData
 
     days = [datetime(2026, 7, 1, tzinfo=SHANGHAI) + timedelta(days=i) for i in range(61)]
+    table = [{"thscode": "600519.SH", "ticker": "600519", "name": "贵州茅台", "asset_type": "a-share"},
+             {"thscode": "000799.SZ", "ticker": "000799", "name": "酒鬼酒", "asset_type": "a-share"},
+             {"thscode": "600307.SH", "ticker": "600307", "name": "酒钢宏兴", "asset_type": "a-share"},
+             {"thscode": "600941.SH", "ticker": "600941", "name": "XD中国移", "asset_type": "a-share"}]
     seen = []
     def handler(request):
-        seen.append((request.url.path, dict(request.url.params)))
+        params = dict(request.url.params)
+        seen.append((request.url.path, params))
         if request.url.path == "/api/meta/tickers/search":
-            # Shape recorded from the live probe on 2026-10-07; the fuzzy neighbour must not be chosen.
-            rows = [{"thscode": "600519.SH", "ticker": "600519", "name": "贵州茅台", "asset_type": "a-share"},
-                    {"thscode": "000799.SZ", "ticker": "000799", "name": "酒鬼酒", "asset_type": "a-share"}]
+            query = params["q"]
+            # Live probe 2026-10-07: the table name of 600941 is the exchange short name "XD中国移", so "中国移动" finds nothing.
+            rows = [row for row in table if query in (row["name"], row["ticker"]) or query in row["name"]]
+            if query == "茅台":
+                rows = table[:2]
             return httpx.Response(200, json={"code": 0, "data": {"item": rows}})
+        if request.url.path == "/api/a-share/prices/snapshot":
+            listed = [code for code in params["thscodes"].split(",") if code == "601857.SH"]
+            return httpx.Response(200, json={"code": 0, "data": {"item": [{"thscode": code} for code in listed]}})
         bars = [{"date_ms": int(day.timestamp() * 1000), "close_price": 1200 + i} for i, day in enumerate(days)]
         data = {"item": bars, **({"adjust": adjust} if adjust else {})}
         return httpx.Response(200, json={"code": 0, "request_id": "r", "data": data})
@@ -242,8 +256,23 @@ def test_stock_lookup_is_exact_and_prices_must_be_forward_adjusted(tmp_path, adj
             market = MarketData(Settings({"FUYAO_API_KEY": "test"}), tmp_path, client)
             market.calendar, market.expected_day = days, days[-1].date().isoformat()
             assert await market.resolve_security("600519") == "600519.SH"
+            # A partial name resolves only when one listed name contains it, and the match is recorded as non-exact.
+            assert await market.resolve_security("茅台") == "600519.SH" and market.matches["600519.SH"]["exact"] is False
+            with pytest.raises(ProbeError, match="ambiguous_security"):
+                await market.resolve_security("酒")
+            assert market.ambiguous["酒"] == ["酒鬼酒", "酒钢宏兴"]
+            # A truncated, marked short name is found by its first characters and shown under the user's name.
+            assert await market.resolve_security("中国移动") == "600941.SH"
+            assert market.securities["600941.SH"] == "中国移动" and market.matches["600941.SH"]["listed_name"] == "XD中国移"
+            assert market.matches["600941.SH"]["exact"] is False and "XD中国移" in market.matches["600941.SH"]["via"]
+            # A ticker hint whose table name disagrees with the user's name is refused.
             with pytest.raises(ProbeError, match="security_not_resolved"):
-                await market.resolve_security("茅台")
+                await market.resolve_security("工商银行", "600519")
+            # When the search knows neither the name nor the ticker, a listed code is used only with an explicit "name not verified" flag.
+            assert await market.resolve_security("中国石油", "601857") == "601857.SH"
+            assert market.matches["601857.SH"]["name_verified"] is False and "未能核对" in market.matches["601857.SH"]["via"]
+            with pytest.raises(ProbeError, match="security_not_resolved"):
+                await market.resolve_security("不存在公司", "688999")
             return await market.get_index_history("600519.SH", 20)
 
     if adjust is None:
@@ -256,3 +285,22 @@ def test_stock_lookup_is_exact_and_prices_must_be_forward_adjusted(tmp_path, adj
     assert seen[-1][1]["adjust"] == "forward"
     # Stocks are not re-checked against the index catalogue.
     assert not any(params.get("asset_type") == "a-share-index" for _, params in seen)
+
+
+def test_suspended_days_do_not_block_stock_research():
+    from datetime import datetime, timedelta
+    from market_research.connections import SHANGHAI
+    from market_research.market_metrics import index_metrics
+
+    days = [datetime(2026, 7, 1, tzinfo=SHANGHAI) + timedelta(days=i) for i in range(61)]
+    expected = [day.date().isoformat() for day in days]
+    bars = [{"date_ms": int(day.timestamp() * 1000), "close_price": 100 + i} for i, day in enumerate(days) if i not in (45, 46)]
+    with pytest.raises(ProbeError, match="incomplete_index_history"):
+        index_metrics(bars, expected_days=expected, window=20)
+    metrics = index_metrics(bars, expected_days=expected, window=20, allow_gaps=True)
+    assert metrics["missing_dates"] == [expected[45], expected[46]] and metrics["return_intervals"] == 20
+    assert metrics["start_date"] == expected[40] and metrics["end_date"] == expected[-1]
+    assert abs(metrics["window_return_pct"] - (160 / 140 - 1) * 100) < 1e-9
+    # Too few sessions inside the window is reported, not stretched into a result.
+    with pytest.raises(ProbeError, match="insufficient_stock_history"):
+        index_metrics(bars[:45], expected_days=expected, window=20, allow_gaps=True)

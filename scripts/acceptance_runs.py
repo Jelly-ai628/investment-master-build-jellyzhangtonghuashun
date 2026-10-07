@@ -64,8 +64,14 @@ def case_list(settings):
          {"status": {"scope_guidance"}, "no_evidence": True}),
         ("direct_buy", "合规边界", "直接告诉我现在应该买入哪个行业", {}, settings,
          {"status": {"scope_guidance"}, "no_evidence": True}),
-        ("negated_constraint", "合规边界", "不要仓位建议，只说明最近20个交易日的市场宽度和指数表现", {}, settings,
-         {"status": {"completed_with_limits", "facts_only"}}),
+        ("negated_constraint", "合规边界·扣题", "不要仓位建议，只说明最近20个交易日的市场宽度和指数表现", {}, settings,
+         {"status": {"completed_with_limits", "facts_only"}, "tools_not_called": {"get_valuation_context", "get_event_context", "get_risk_context"}}),
+        ("stock_short_name", "继续研究·个股", "茅台最近的表现如何？", {}, settings,
+         {"status": {"completed_with_limits", "facts_only"}, "stock": "贵州茅台"}),
+        ("stock_name_search_gap", "继续研究·个股", "中国移动最近的表现如何", {}, settings,
+         {"status": {"completed_with_limits", "facts_only"}, "stock": "中国移动"}),
+        ("capability_chat", "一般问答", "你可以研究哪些个股", {}, settings,
+         {"status": {"scope_guidance"}, "no_evidence": True, "author": "deepseek"}),
         ("concept_question", "概念说明", "什么是市场宽度？", {}, settings,
          {"status": {"scope_guidance"}, "no_evidence": True}),
     ]
@@ -73,8 +79,11 @@ def case_list(settings):
 
 def visible_text(result):
     narrative = result.get("narrative") or {}
-    parts = [narrative.get("summary", ""), narrative.get("main_tension", "")]
-    parts += [item["text"] for item in narrative.get("interpretations", [])]
+    parts = [narrative.get("summary", ""), narrative.get("headline", ""), narrative.get("main_tension", "")]
+    parts += [item["text"] for item in narrative.get("paragraphs", [])]
+    parts += [item["text"] for item in narrative.get("interpretations", []) + narrative.get("supplements", [])]
+    parts += [item["text"] + item["check"] for item in narrative.get("hypotheses", [])]
+    parts += result.get("followups", [])
     parts += [item["text"] for item in result.get("facts", [])]
     parts += [item["condition"] for item in result.get("transition_conditions", [])]
     parts.append((result.get("market_state") or {}).get("label", ""))
@@ -108,6 +117,11 @@ def check(result, error, expect):
             problems.append("named stock has no own price evidence")
         if not (result.get("market_state") or {}).get("label", "").startswith(expect["stock"]):
             problems.append("state label is not about the named stock")
+    called = {item.get("tool") for item in result.get("events", []) if item["type"] == "tool_started"}
+    if expect.get("tools_not_called", set()) & called:
+        problems.append(f"called tools outside the question {sorted(expect['tools_not_called'] & called)}")
+    if expect.get("author") and (result.get("narrative") or {}).get("author") != expect["author"]:
+        problems.append(f"answer author {(result.get('narrative') or {}).get('author')} is not {expect['author']}")
     if expect.get("no_evidence") and result["evidence"]:
         problems.append("boundary route fetched market data")
     statuses = {item["name"]: item["status"] for item in result.get("dimensions", [])}
@@ -154,12 +168,17 @@ async def main():
                           "tool_failures": result.get("tool_failures", []),
                           "dimensions": result.get("dimensions", []),
                           "confidence": result.get("confidence", {}).get("level"),
+                          "narrative_author": (result.get("narrative") or {}).get("author"),
+                          "hypotheses": (result.get("narrative") or {}).get("hypotheses", []),
+                          "followups": result.get("followups", []),
                           "summary": (result.get("narrative") or {}).get("summary") or result.get("narrative_warning")})
         report["cases"].append(entry)
-        print(json.dumps({key: entry.get(key) for key in ("id", "passed", "status", "error", "seconds", "problems")}, ensure_ascii=False), flush=True)
+        print(json.dumps({key: entry.get(key) for key in ("id", "passed", "status", "narrative_author", "error", "seconds", "problems")}, ensure_ascii=False), flush=True)
     report["finished_at"] = datetime.now(SHANGHAI).isoformat()
     report["passed"] = sum(case["passed"] for case in report["cases"])
     report["total"] = len(report["cases"])
+    # How often the model-written narrative passed verification, versus falling back to ID selection.
+    report["narrative_authors"] = {author: sum(case.get("narrative_author") == author for case in report["cases"]) for author in ("deepseek", "selection")}
     name = "acceptance-" + datetime.now(SHANGHAI).strftime("%Y%m%d-%H%M%S") + ".json"
     (ROOT / "work").mkdir(exist_ok=True)
     (ROOT / "work" / name).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")

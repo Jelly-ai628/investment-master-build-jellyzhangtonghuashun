@@ -6,6 +6,7 @@ from datetime import timedelta
 import json
 from pathlib import Path
 import re
+import time
 from typing import Literal
 import uuid
 
@@ -14,8 +15,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .connections import Settings, ProbeError, DEEPSEEK, SHANGHAI, request_json, first_message
 from .market_data import MarketData, INDICES, private_json
-from .insights import MAX_DETAILS, InsightSelection, candidates, render_selection
+from .insights import MAX_DETAILS, InsightSelection, candidates, full_text, render_selection
+from .narrative import WRITER_INSTRUCTIONS, GroundedNarrative, NarrativeRejected, available_charts, check_narrative, merge_calls, normalize_draft, writer_tool
 from .intent import classify_question
+from .chat import answer_without_data
 from .sector_ranking import ranking_answer
 
 
@@ -37,7 +40,22 @@ def asks_for_prohibited_output(question: str) -> bool:
 
 MARKET_WORDS = re.compile(r"A股|大盘|市场|股市|两市|沪深两市|全市场|整体市场|A股市场")
 IFIND_TOOL_TIMEOUT = 50
-SKILL_VERSION = "research-skills-v2"
+SKILL_VERSION = "research-skills-v3"
+WRITER_ATTEMPTS = 3
+# Seconds after the run started beyond which another rewrite would risk the 240-second job limit.
+WRITER_DEADLINE = 150
+# Planning and fallback-selection guidance is noise for the writer, which only needs how to read the evidence.
+WRITER_SKIPS = re.compile(r"^## .*(取数计划|选择与排序|撰写、选择与排序|标准流程|问题与证据组合)")
+
+
+def writer_skill(skill: str) -> str:
+    kept, skipping = [], False
+    for line in skill.splitlines():
+        if line.startswith("## "):
+            skipping = bool(WRITER_SKIPS.match(line))
+        if not skipping:
+            kept.append(line)
+    return "\n".join(kept)
 
 
 def select_skills(task: str, question: str, *, stock: bool, industries: bool, history: bool,
@@ -80,15 +98,19 @@ def deterministic_report(evidences: dict, failures: list[dict]) -> dict:
         data = item["data"]
         if item["kind"] == "index_history":
             stock = data.get("instrument_type") == "stock"
-            facts.append({"text": f"{data['name']}从{data['start_date']}至{data['end_date']}，首末{'前复权收盘价' if stock else '点位'}变化{data['window_return_pct']:+.2f}%，区间最大回撤{data['max_drawdown_pct']:.2f}%。", "evidence_ids": [key], "kind": "fact"})
-            conditions.append({"label": f"继续观察{data['name']}的区间表现", "metric": "window_return_pct", "baseline": data["window_return_pct"],
+            missing = data.get("missing_dates") or []
+            facts.append({"text": f"{data['name']}从{data['start_date']}至{data['end_date']}，首末{'前复权收盘价' if stock else '点位'}变化{data['window_return_pct']:+.2f}%，区间最大回撤{data['max_drawdown_pct']:.2f}%。"
+                          + (f"研究区间内{'、'.join(missing[:5])}{'等' if len(missing) > 5 else ''}共{len(missing)}个交易日没有该股日K，未补值。" if missing else ""), "evidence_ids": [key], "kind": "fact"})
+            now = "涨" if data["window_return_pct"] > 0 else "跌"
+            conditions.append({"label": f"{data['name']}的区间方向是否反转", "metric": "window_return_pct", "baseline": data["window_return_pct"],
                                "unit": "%", "evidence_id": key, "observation_window": "后续2个完整交易日", "rule_version": "state-review-v1",
-                               "condition": f"在后续2个完整交易日分别重算{data.get('return_intervals', 20)}交易日窗口，若首末变化都与当前方向相反，重新评估该{'股票' if stock else '指数'}的区间方向。该规则用于复核，不代表预测或操作信号。"})
+                               "condition": f"现在{data.get('return_intervals', 20)}个交易日首末变化是{data['window_return_pct']:+.2f}%（{now}）。之后2个完整交易日各重算一次同长度窗口，如果两次都转为{'下跌' if now == '涨' else '上涨'}，就要重新判断它的区间方向。这是复核规则，不是交易信号。"})
         elif item["kind"] == "market_breadth" and data["quality"] != "insufficient_coverage":
             facts.append({"text": f"{data['date']}核验样本{data['eligible_count']}家，上涨{data['advancers']}家、下跌{data['decliners']}家、平盘{data['unchanged']}家；上涨占比{data['advancing_ratio_pct']:.2f}%，有效覆盖{data['coverage_pct']:.2f}%。", "evidence_ids": [key], "kind": "fact"})
-            conditions.append({"label": "检验市场参与度是否改变", "metric": "advancing_ratio_pct", "baseline": data["advancing_ratio_pct"],
+            more = "上涨" if data["advancers"] > data["decliners"] else "下跌"
+            conditions.append({"label": "多数股票的方向是否改变", "metric": "advancing_ratio_pct", "baseline": data["advancing_ratio_pct"],
                                "unit": "%", "evidence_id": key, "observation_window": "后续2个完整交易日", "rule_version": "state-review-v1",
-                               "condition": "在后续2个完整交易日保持相同样本核验口径，若上涨与下跌家数的相对多寡均与本次相反，重新评估参与度判断；覆盖不足时不触发正常状态切换。"})
+                               "condition": f"本次{more}家数更多（上涨占比{data['advancing_ratio_pct']:.2f}%）。如果之后2个完整交易日按同一口径统计，都变成{'下跌' if more == '上涨' else '上涨'}家数更多，就要重新判断参与度；覆盖率不足98%的那天不计入。"})
         elif item["kind"] == "sentiment":
             facts.append({"text": f"{data['date']}供应商涨停池{data['limit_up_count']}家、跌停池{data['limit_down_count']}家，已按同日收盘价逐条核对。", "evidence_ids": [key], "kind": "fact"})
         elif item["kind"] == "historical_comparison":
@@ -106,7 +128,7 @@ def deterministic_report(evidences: dict, failures: list[dict]) -> dict:
         elif item["kind"] == "sector_ranking":
             facts.append({"text": ranking_answer(data), "evidence_ids": [key], "kind": "fact"})
             conditions.append({"label": "何时重新评估这份名单", "metric": "sector_rank", "baseline": 0, "unit": "排序",
-                "evidence_id": key, "condition": f"后续完整交易日按同样的{data['window']}交易日窗口和行业范围重算。若头部排序或近5日方向改变，重新比较；数据覆盖下降时不沿用旧名单。"})
+                "evidence_id": key, "condition": f"之后的完整交易日按同样的{data['window']}个交易日窗口和行业范围重算。如果前五名换了人，或它们近5日的方向变了，就重新比较；数据覆盖下降时不沿用旧名单。"})
     has_breadth = any(item["kind"] == "market_breadth" and item["data"]["quality"] != "insufficient_coverage" for item in evidences.values())
     indices = sum(item["kind"] == "index_history" for item in evidences.values())
     broad = [item for item in evidences.values() if item["kind"] == "index_history" and item["data"].get("instrument_type") not in ("industry", "stock")]
@@ -162,6 +184,10 @@ def security_report(stock_items: list[dict], evidences: dict, failures: list[dic
                      "所属行业、公司公告与财务变化本轮未核实（扶摇股票基础信息接口尚未开放），不能把价格变化归因于基本面或行业轮动。"]
     if valuation:
         uncertainties.append(f"估值为扶摇最新快照（数据时间{valuation['data']['date']}），不是历史序列，不能判断高低估。")
+    if s.get("missing_dates"):
+        uncertainties.append(f"研究区间内有{len(s['missing_dates'])}个交易日没有该股日K（可能停牌或尚未上市），区间变化按已有交易日计算，未补值。")
+    if relative == "缺失" and benchmark:
+        relative = "该股与沪深300的起止日期不同（有交易日缺失），未做相对比较"
     return {"market_state": {"label": label, "evidence_ids": basis, "scope": "该股已发生的行情及与沪深300的同区间相对表现。", "rule_version": "security-state-v1"},
             "confidence": {"level": "中" if len(basis) > 1 else "低", "scope": "仅针对该股已发生的行情与估值快照，不代表涨跌概率。",
                            "reasons": ["价格事实由扶摇日K字段与代码计算支持。", "行业归属、公司公告与财务驱动未核实。"]},
@@ -174,6 +200,7 @@ def security_report(stock_items: list[dict], evidences: dict, failures: list[dic
 async def run_research(request: ResearchRequest, settings: Settings, root: Path, emit=None) -> dict:
     run_id = uuid.uuid4().hex
     events = []
+    started = time.monotonic()
 
     async def event(kind, **payload):
         item = {"seq": len(events) + 1, "type": kind, "time": datetime.now(SHANGHAI).isoformat(), **payload}
@@ -199,10 +226,10 @@ async def run_research(request: ResearchRequest, settings: Settings, root: Path,
         raise ProbeError("deepseek_not_configured")
     headers = {"Authorization": "Bearer " + settings.get("DEEPSEEK_API_KEY")}
     model = settings.get("DEEPSEEK_MODEL")
-    async def guidance(intent, message, followups, scope):
+    async def guidance(intent, message, followups, scope, author="rules"):
         result = {"run_id": run_id, "question": request.question, "as_of": "未取数", "window": request.window,
             "status": "scope_guidance", "presentation": "message", "created_at": datetime.now(SHANGHAI).isoformat(),
-            "narrative": {"summary": message, "main_tension": "", "interpretations": []},
+            "narrative": {"summary": message, "main_tension": "", "interpretations": [], "author": author},
             "facts": [], "evidence": [], "transition_conditions": [], "dimensions": [], "uncertainties": [],
             "confidence": {"level": "不适用", "scope": scope, "reasons": []},
             "followups": followups, "events": events, "tool_failures": [], "model": model, "intent": intent.model_dump()}
@@ -216,16 +243,24 @@ async def run_research(request: ResearchRequest, settings: Settings, root: Path,
         await event("intent", task=intent.task, entities=intent.entities)
         if intent.task == "single_security" and not intent.entities:
             return await guidance(intent, "请补充要研究的股票简称或6位代码，例如“贵州茅台”或“600519”。", ["贵州茅台最近20个交易日表现如何？", "最近20个交易日市场整体状态如何？"], "未给出具体证券，未进行取数。")
-        if intent.task in ("explanation", "clarification") or (intent.task == "sector_ranking" and intent.sector_universe == "concept"):
+        if intent.task in ("explanation", "chat", "clarification") or (intent.task == "sector_ranking" and intent.sector_universe == "concept"):
+            # Questions that need no market data get a real answer from DeepSeek; the canned texts are only a fallback.
+            await event("step_started", label="DeepSeek回答（本轮不取数）")
+            try:
+                reply = await answer_without_data(client, settings, request.question, request.context, asks_for_prohibited_output,
+                    lambda attempt, item: private_json(root / "work" / "validation-attempts" / f"{run_id}-chat-{attempt}.json", item))
+                return await guidance(intent, reply["answer"], reply["followups"], "本轮没有调用数据接口，回答不包含行情数据。", "deepseek")
+            except ProbeError as error:
+                await event("validation_retry", reason=error.category)
             explanations = {
                 "breadth": "市场宽度衡量有多少证券参与了市场表现。上涨家数、下跌家数和上涨占比是常见观察项，必须说明样本范围、停牌/缺失处理和统计日期。它与指数涨跌并不相同。",
                 "valuation": "PE比较价格与盈利，PB比较价格与账面净资产。比较时需要同一时点和财务口径；当前值不等于历史分位，低估值也不自动代表低风险。",
                 "drawdown": "最大回撤是一个区间内从已经出现的高点到后续低点的最大下降幅度，与区间首末收益不同，不能据此直接推断未来表现。",
                 "moving_average": "均线是一定数量交易日价格的算术平均。当前点位低于均线，不等于当天刚刚穿过均线，也不等于市场参与者的真实成本。",
-                "usage": "可以直接问市场状态、哪些行业近期较强、指定板块如何比较、有哪些风险变量，或两个历史阶段有什么不同。我会按问题选择数据，并说明依据与局限。",
+                "usage": "可以直接问：市场整体状态、哪些行业近期较强、指定行业之间怎么比、大小盘风格、涨跌停与风险信号、某段时间和上个月相比，或者某只A股股票的表现。股票用简称或6位代码提问，例如“贵州茅台最近20个交易日表现如何？”或“600519相对沪深300表现如何？”；名称检索不到时换成6位代码再试。我会实际取数，并说明依据与局限。",
             }
-            message = explanations.get(intent.explanation_topic, "请补充希望研究的对象或范围，例如行业板块、概念主题或具体指数。当前行业全景比较使用同花顺行业目录的881系列，不能把它冒充概念主题排名。")
-            return await guidance(intent, message, ["最近有哪些表现较强的行业板块？", "银行和半导体在同一区间表现如何？"], "本轮是概念说明或范围澄清。")
+            message = explanations.get(intent.explanation_topic, explanations["usage"])
+            return await guidance(intent, message, ["贵州茅台最近20个交易日表现如何？", "最近有哪些表现较强的行业板块？", "最近20个交易日市场整体状态如何？"], "本轮是概念说明或范围澄清。")
         data = MarketData(settings, root, client)
         data.on_progress = lambda label: event("step_started", label=label)
         await event("step_started", label="确认交易日与研究范围")
@@ -246,22 +281,30 @@ async def run_research(request: ResearchRequest, settings: Settings, root: Path,
         unresolved = [entity for entity in intent.entities if entity not in catalog and not names_index(entity) and not MARKET_WORDS.fullmatch(entity)]
         # Named objects outside the index and industry catalogues are looked up as A-share stocks before anything else is considered.
         securities, failures, found = {}, [], set()
+        hints = dict(zip(intent.entities, intent.entity_codes))
         for entity in unresolved[:3]:
-            await event("tool_started", tool="resolve_security", purpose="在扶摇A股代码表中精确匹配" + entity, code=None)
+            await event("tool_started", tool="resolve_security", purpose="在扶摇A股代码表中匹配" + entity, code=None)
             try:
-                code = await data.resolve_security(entity)
+                code = await data.resolve_security(entity, hints.get(entity) or None)
                 securities[code] = data.securities[code]
                 found.add(entity)
             except ProbeError as error:
                 failures.append({"tool": "resolve_security", "code": entity, "reason": error.category})
             await event("tool_completed", tool="resolve_security", evidence_id=None, status="collected" if entity in found else "unavailable")
         unresolved = [entity for entity in unresolved if entity not in found]
+        ambiguous = {entity: names for entity, names in getattr(data, "ambiguous", {}).items() if entity in unresolved}
+        if ambiguous and not securities:
+            entity, names = next(iter(ambiguous.items()))
+            return await guidance(intent, f"扶摇A股代码表里有不止一只股票的名称包含“{entity}”：{'、'.join(names)}。你想研究的是哪一只？",
+                [f"{name}最近{request.window}个交易日表现如何？" for name in names[:3]], "问题对象对应多只股票，未进行取数。")
+        # Narrow questions ("只说明……") get only the dimensions they name; broad overviews still try every framework dimension.
+        narrow = bool(re.search(r"只(?:说明|看|讲|要|关注|分析|研究|谈|问)", request.question))
         risk_asked = intent.task == "risk_research" or bool(re.search("风险|情绪|涨停|跌停|极端", request.question))
         # Whole-market questions also attempt the sentiment dimension; only explicit risk questions must lead with it.
-        wants_risk = risk_asked or intent.task == "market_overview"
+        wants_risk = risk_asked or (intent.task == "market_overview" and not narrow)
         # Valuation and events are attempted for whole-market questions so their absence is observed, not assumed.
-        wants_valuation = intent.task not in ("sector_ranking", "single_security") and (intent.task in ("market_overview", "valuation") or bool(re.search("估值|市盈率|市净率|PE|PB", request.question, re.I)))
-        wants_events = intent.task != "sector_ranking" and (intent.task in ("market_overview", "events") or bool(re.search("事件|政策|新闻|央行|公告|逆回购", request.question)))
+        wants_valuation = intent.task not in ("sector_ranking", "single_security") and ((intent.task == "market_overview" and not narrow) or intent.task == "valuation" or bool(re.search("估值|市盈率|市净率|PE|PB", request.question, re.I)))
+        wants_events = intent.task != "sector_ranking" and ((intent.task == "market_overview" and not narrow) or intent.task == "events" or bool(re.search("事件|政策|新闻|央行|公告|逆回购", request.question)))
         await event("scope", as_of=data.expected_day, window=request.window, latest_day=data.latest_day, comparison_end_date=comparison_end, industries=industry_names, securities=securities)
         skill_names = select_skills(intent.task, request.question, stock=bool(securities), industries=bool(industry_names),
                                     history=bool(comparison_end), risk=wants_risk, valuation=wants_valuation, events=wants_events)
@@ -301,8 +344,8 @@ async def run_research(request: ResearchRequest, settings: Settings, root: Path,
         if not required_codes and not industry_names:
             if unresolved:
                 # The default index only stands in for "the market", never for an object the user named.
-                reasons = "；".join(f"{item['code']}：{item['reason']}" for item in failures if item["reason"] != "security_not_resolved")
-                return await guidance(intent, f"未能在支持的宽基指数（{'、'.join(INDICES.values())}）、同花顺行业目录或扶摇A股代码表中精确匹配到“{'、'.join(unresolved)}”" + (f"（查询失败：{reasons}）" if reasons else "") + "，因此本轮没有取数，也不会用沪深300等其他对象代替作答。如果是股票，请提供完整简称或6位代码。",
+                reasons = "；".join(f"{item['code']}：{item['reason']}" for item in failures if item["reason"] not in ("security_not_resolved", "ambiguous_security"))
+                return await guidance(intent, f"没有找到“{'、'.join(unresolved)}”：它不在支持的宽基指数（{'、'.join(INDICES.values())}）和同花顺行业目录里，扶摇A股代码表按名称和代码也没有检索到" + (f"（接口返回：{reasons}）" if reasons else "") + "。本轮没有取数，也不会拿沪深300等其他对象代替。如果是A股股票，换成6位代码再问一次通常就能找到，例如“600519最近20个交易日表现如何？”。",
                     ["贵州茅台最近20个交易日表现如何？", "最近有哪些表现较强的行业板块？", "最近20个交易日市场整体状态如何？"], "问题对象未能匹配到可研究的指数、行业或股票，未进行取数。")
             required_codes = {"000300.SH"}
         required_calls = {"get_index_history:" + code for code in required_codes}
@@ -408,6 +451,13 @@ async def run_research(request: ResearchRequest, settings: Settings, root: Path,
                 # Without the stock's own prices the answer would be about something else; fail visibly instead.
                 raise ProbeError("security_history_not_obtained")
             base.update(security_report(stock_items, data.evidence, failures))
+        notices = []
+        for match in getattr(data, "matches", {}).values():
+            if match.get("name_verified") is False:
+                notices.append(f"扶摇A股代码表检索不到“{match['query']}”。本轮按{match['via']}进行研究；如果{match['code']}不是你要的股票，请改用正确的6位代码提问。")
+            elif not match["exact"]:
+                notices.append(f"“{match['query']}”不是代码表里的完整名称，已按{match['via']}匹配为{match['name']}（{match['code']}）；如果不是你要的股票，请改用6位代码提问。")
+        base["uncertainties"][:0] = notices
         if unresolved:
             base["uncertainties"].append(f"未能匹配到“{'、'.join(unresolved)}”，本轮未纳入研究，也没有用其他对象代替。")
         available = {key: item for key, item in data.evidence.items() if item["kind"] != "market_breadth" or item["data"]["quality"] != "insufficient_coverage"}
@@ -418,16 +468,97 @@ async def run_research(request: ResearchRequest, settings: Settings, root: Path,
         if intent.task == "sector_ranking":
             insights = {key: value for key, value in insights.items() if value["dimension"] == "板块强弱"}
             tensions = {key: value for key, value in tensions.items() if key == "sector_ranking_scope"}
+        def coverage_problem(summary_ids, detail_ids):
+            # The question the user asked must be answered by what is shown first, whoever wrote it.
+            selected = [insights[key] for key in detail_ids]
+            if intent.task == "sector_ranking" and "sector_leaders" not in summary_ids:
+                return "sector_question_not_answered_first"
+            if securities and not any(insights[key]["dimension"] in ("个股行情", "相对大盘") for key in summary_ids):
+                return "security_question_not_answered_first"
+            if risk_asked and any(e["kind"] == "sentiment" for e in available.values()) and not any(item["dimension"] == "风险变量" for item in selected):
+                return "risk_question_not_addressed"
+            if comparison_end and any(e["kind"] == "historical_comparison" for e in available.values()) and not any(item["dimension"] == "历史阶段" for item in selected):
+                return "history_question_not_addressed"
+            if industry_names and any(e["data"].get("instrument_type") == "industry" for e in available.values()) and not any(item["dimension"] in ("行业研究", "行业比较") for item in selected):
+                return "industry_question_not_addressed"
+            if intent.task == "valuation" and any(e["kind"] == "valuation" for e in available.values()) and not any(item["dimension"] == "估值" for item in selected):
+                return "valuation_question_not_addressed"
+            if intent.task == "events" and any(e["kind"] == "events" for e in available.values()) and not any(item["dimension"] == "重要事件" for item in selected):
+                return "events_question_not_addressed"
+            return None
+
+        narrative, selection_record, written_followups = None, None, None
+        # DeepSeek first writes the interpretation layer itself; every claim is checked against the insights it cites.
+        await event("step_started", label="DeepSeek撰写解读")
+        facts_for_model = [{"text": fact["text"], "evidence_ids": fact["evidence_ids"]} for fact in base.get("facts", [])]
+        asked = [name for name, pattern in (("行情结构", "行情|走势|表现|涨|跌|指数|大盘|结构"), ("市场宽度", "宽度|参与度|涨跌家数|普涨|普跌"),
+                    ("风格轮动", "风格|大小盘|大盘股|小盘|成长|价值"), ("估值", "估值|市盈率|市净率|PE|PB"), ("流动性", "成交|流动性|量能|缩量|放量"),
+                    ("情绪", "情绪|涨停|跌停|风险|极端"), ("重要事件", "事件|政策|新闻|央行|逆回购"), ("历史阶段", "历史|上个月|相比|对比"))
+                 if re.search(pattern, request.question, re.I)]
+        focus = {"task": intent.task, "objects": list(securities.values()) + industry_names + [INDICES[code] for code in sorted(required_codes) if code in INDICES],
+                 "asked_dimensions": asked or ["用户没有限定维度，按问题回答最重要的发现"],
+                 "matched_securities": notices}
+        # A narrow question is not padded with the dimensions it did not ask about, even to say they are missing.
+        not_obtained = [item["name"] + "：" + item["status"] for item in base.get("dimensions", [])
+                        if not item["status"].startswith("已取得") and (not narrow or item["name"] in asked)]
+        writer = [{"role": "system", "content": writer_skill(skill) + "\n\n" + WRITER_INSTRUCTIONS},
+                  {"role": "user", "content": json.dumps({"question": request.question, "focus": focus, "as_of": data.expected_day, "window": request.window,
+                      "market_state": (base.get("market_state") or {}).get("label"), "facts": facts_for_model,
+                      "insights": [{k: v for k, v in item.items() if k != "derivation"} for item in insights.values()], "tensions": list(tensions.values()),
+                      "not_obtained": not_obtained,
+                      "tool_failures": [{"tool": item["tool"], "reason": item["reason"]} for item in failures]}, ensure_ascii=False)}]
+        tool = writer_tool(insights, tensions, available_charts(available))
+        for attempt in range(WRITER_ATTEMPTS):
+            if attempt and time.monotonic() - started > WRITER_DEADLINE:
+                # A rewrite that would overrun the job budget is skipped; the verified selection below still answers.
+                break
+            response = await request_json(client, "POST", DEEPSEEK + "/chat/completions", headers=headers,
+                                          json={"model": model, "messages": writer, "max_tokens": 3000, "thinking": {"type": "disabled"},
+                                                "tools": [tool], "tool_choice": {"type": "function", "function": {"name": "write_grounded_narrative"}}})
+            content, finish = None, (response.get("choices") or [{}])[0].get("finish_reason")
+            try:
+                reply = first_message(response)
+                calls = [call for call in reply.get("tool_calls") or [] if call.get("function", {}).get("name") == "write_grounded_narrative"]
+                if calls:
+                    content = json.dumps(merge_calls([call["function"].get("arguments") or "" for call in calls]), ensure_ascii=False)
+                else:
+                    # Live 2026-10-07: the first forced call sometimes came back without a tool call; a JSON body in the text is still a draft.
+                    text = reply.get("content") if isinstance(reply.get("content"), str) else ""
+                    found = re.search(r"\{.*\}", text, re.S)
+                    if not found:
+                        raise NarrativeRejected([f"没有调用 write_grounded_narrative（finish_reason={finish}，正文{len(text)}字）"])
+                    content = found.group(0)
+                try:
+                    draft = GroundedNarrative.model_validate(normalize_draft(json.loads(content)))
+                except json.JSONDecodeError as error:
+                    raise NarrativeRejected([f"参数不是合法JSON：{error.msg}（第{error.pos}个字符附近）"]) from None
+                except ValidationError as error:
+                    raise NarrativeRejected([f"{'.'.join(map(str, item['loc']))}：{item['msg']}" for item in error.errors()[:6]]) from None
+                scope = f"{request.window}个交易日 {data.expected_day} " + " ".join(list(INDICES.values()) + list(securities.values()) + industry_names)
+                written = check_narrative(draft, insights, tensions, asks_for_prohibited_output, scope, facts_for_model)
+                detail_ids = list(dict.fromkeys(key for item in written["paragraphs"] for key in item["insight_ids"]))
+                problem = coverage_problem(written["summary_ids"], detail_ids)
+                if problem:
+                    raise NarrativeRejected([problem])
+                written_followups = written.pop("followups")
+                narrative = written
+                break
+            except NarrativeRejected as error:
+                await event("validation_retry", reason="narrative_unverified", problems=error.problems[:8])
+                private_json(root / "work" / "validation-attempts" / f"{run_id}-narrative-{attempt}.json", {"problems": error.problems, "content": content, "finish_reason": finish,
+                            "raw_message": json.dumps((response.get("choices") or [{}])[0].get("message"), ensure_ascii=False)[:3000] if content is None else None, "not_for_display": True})
+                writer.append({"role": "assistant", "content": content if isinstance(content, str) else "{}"})
+                writer.append({"role": "user", "content": "解读未通过服务端核验，请修正后重新调用 write_grounded_narrative，参数必须是合法JSON：" + "；".join(error.problems[:8]) + "。数字和日期只能来自所依据的观点或事实（可以四舍五入，正负方向不能写反）；没有依据的数字直接删掉。"})
+
+        # If the written narrative cannot be verified, DeepSeek still orders the code-written insights by ID.
         composer = [{"role": "system", "content": skill + "\n根据用户问题，从已计算并可追溯的候选观点中选择最相关的摘要、主要矛盾和展开顺序。不要改写、补造或返回文字，只返回JSON选择。summary_ids必须包含在detail_ids中，不得重复；仅使用候选id。字段为summary_ids数组、tension_id字符串、detail_ids数组。"},
                     {"role": "user", "content": json.dumps({"question": request.question, "insights": list(insights.values()), "tensions": list(tensions.values())}, ensure_ascii=False)}]
-        narrative = None
-        selection_record = None
         selection_schema = InsightSelection.model_json_schema()
         selection_schema["properties"]["summary_ids"]["items"]["enum"] = list(insights)
         selection_schema["properties"]["detail_ids"]["items"]["enum"] = list(insights)
         selection_schema["properties"]["tension_id"]["enum"] = list(tensions)
         selection_tool = {"type": "function", "function": {"name": "select_verified_insights", "description": "选择与问题相关的已核验观点，不能新增或改写结论。", "parameters": selection_schema}}
-        for attempt in range(2):
+        for attempt in range(0 if narrative else 2):
             response = await request_json(client, "POST", DEEPSEEK + "/chat/completions", headers=headers,
                                           json={"model": model, "messages": composer, "max_tokens": 600, "thinking": {"type": "disabled"},
                                                 "tools": [selection_tool], "tool_choice": {"type": "function", "function": {"name": "select_verified_insights"}}})
@@ -449,28 +580,11 @@ async def run_research(request: ResearchRequest, settings: Settings, root: Path,
                     selection = InsightSelection(summary_ids=summary, tension_id=selection.tension_id, detail_ids=details)
                     await event("validation_repair", dropped_ids=dropped)
                 narrative = render_selection(selection, insights, tensions)
-                selected_details = [insights[key] for key in selection.detail_ids]
-                if intent.task == "sector_ranking" and "sector_leaders" not in selection.summary_ids:
-                    raise ProbeError("sector_question_not_answered_first")
-                if securities and not any(insights[key]["dimension"] in ("个股行情", "相对大盘") for key in selection.summary_ids):
-                    raise ProbeError("security_question_not_answered_first")
-                if risk_asked and any(e["kind"] == "sentiment" for e in available.values()) and not any(item["dimension"] == "风险变量" for item in selected_details):
-                    raise ProbeError("risk_question_not_addressed")
-                if comparison_end and any(e["kind"] == "historical_comparison" for e in available.values()) and not any(item["dimension"] == "历史阶段" for item in selected_details):
-                    raise ProbeError("history_question_not_addressed")
-                if industry_names and any(e["data"].get("instrument_type") == "industry" for e in available.values()) and not any(item["dimension"] in ("行业研究", "行业比较") for item in selected_details):
-                    raise ProbeError("industry_question_not_addressed")
-                if intent.task == "valuation" and any(e["kind"] == "valuation" for e in available.values()) and not any(item["dimension"] == "估值" for item in selected_details):
-                    raise ProbeError("valuation_question_not_addressed")
-                if intent.task == "events" and any(e["kind"] == "events" for e in available.values()) and not any(item["dimension"] == "重要事件" for item in selected_details):
-                    raise ProbeError("events_question_not_addressed")
+                problem = coverage_problem(selection.summary_ids, selection.detail_ids)
+                if problem:
+                    raise ProbeError(problem)
+                narrative["author"] = "selection"
                 selection_record = {**selection.model_dump(), "dropped_unknown_ids": dropped}
-                # Framework dimensions with verified evidence stay visible even when the model ranks them lower.
-                chosen = {item["dimension"] for item in selected_details}
-                for key, item in insights.items():
-                    if item["dimension"] in ("估值", "风险变量", "重要事件") and item["dimension"] not in chosen:
-                        narrative["interpretations"].append({k: v for k, v in item.items() if k in ("text", "dimension", "evidence_ids")})
-                        chosen.add(item["dimension"])
                 break
             except (ValidationError, ProbeError, TypeError) as error:
                 narrative = None
@@ -480,15 +594,27 @@ async def run_research(request: ResearchRequest, settings: Settings, root: Path,
                 if attempt == 0:
                     composer.append({"role": "assistant", "content": content if isinstance(content, str) else "{}"})
                     composer.append({"role": "user", "content": "选择未通过校验：" + reason + f"。summary_ids为1至3条，detail_ids为1至{MAX_DETAILS}条；summary_ids与detail_ids只能使用insights中的id：" + "、".join(insights) + "；tension_id只能使用：" + "、".join(tensions) + "。"})
+        if narrative:
+            # Framework dimensions with verified evidence stay visible even when the answer leaves them out.
+            cited = [key for item in narrative.get("paragraphs", []) for key in item["insight_ids"]]
+            chosen = {insights[key]["dimension"] for key in cited} | {item["dimension"] for item in narrative["interpretations"]}
+            missing = []
+            for key, item in insights.items():
+                if item["dimension"] in ("估值", "风险变量", "重要事件") and item["dimension"] not in chosen:
+                    missing.append({**{k: v for k, v in item.items() if k in ("id", "text", "dimension", "evidence_ids")}, "author": "rules"})
+                    chosen.add(item["dimension"])
+            # They are listed apart from the answer, so a question about one thing is not padded with another.
+            narrative["supplements"] = [{**item, "text": full_text(insights[item["id"]])} for item in missing]
+        default_followups = ([f"{name}最近60个交易日与沪深300相比表现如何？" for name in list(securities.values())[:1]] + ["最近有哪些表现较强的行业板块？", "最近20个交易日市场整体状态如何？"] if securities else
+                             ["同一区间大小盘风格有什么差异？", "银行和半导体行业在同一区间表现如何？", "末日涨跌停分布有哪些风险信号？", "与上个月末结束的同长度历史区间相比有什么不同？"])
         result = {"run_id": run_id, "question": request.question, "as_of": data.expected_day, "window": request.window,
                   "status": "completed_with_limits" if narrative else "facts_only", "created_at": datetime.now(SHANGHAI).isoformat(),
                   "narrative": narrative,
                   "narrative_warning": None if narrative else "解释未通过校验，仅呈现已验证事实。",
                   **base, "evidence": list(data.evidence.values()),
-                  "followups": [f"{name}最近60个交易日与沪深300相比表现如何？" for name in list(securities.values())[:1]] + ["最近有哪些表现较强的行业板块？", "最近20个交易日市场整体状态如何？"] if securities else
-                      ["同一区间大小盘风格有什么差异？", "银行和半导体行业在同一区间表现如何？", "末日涨跌停分布有哪些风险信号？", "与上个月末结束的同长度历史区间相比有什么不同？"],
+                  "followups": (written_followups or [])[:4] if len(written_followups or []) >= 2 else list(dict.fromkeys((written_followups or []) + default_followups))[:4], "notices": notices,
                   "model": model, "skill_version": SKILL_VERSION, "events": events}
-        result["analysis_protocol"] = "grounded-insight-selection-v1"
+        result["analysis_protocol"] = "grounded-narrative-v1" if narrative and narrative["author"] == "deepseek" else "grounded-insight-selection-v1"
         result["intent"] = intent.model_dump()
         result["presentation"] = "sector_ranking" if intent.task == "sector_ranking" else "research"
         result["skills_loaded"] = loaded_skills

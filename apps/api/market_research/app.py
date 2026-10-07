@@ -253,7 +253,11 @@ def create_app(root=ROOT, runner=run_research):
     @app.get("/api/research/{identifier}")
     async def read_job(identifier: str, request: Request):
         row = job_for(request, identifier)
-        return {"id": row["id"], "status": row["status"], "error": row["error"], "request": json.loads(row["request"]), "result": json.loads(row["result"]) if row["result"] else None}
+        body = {"id": row["id"], "status": row["status"], "error": row["error"], "request": json.loads(row["request"]), "result": json.loads(row["result"]) if row["result"] else None}
+        if row["status"] in ("queued", "running"):
+            # Proxies such as tunnels may buffer the event stream; polling still carries recent progress.
+            body["progress"] = [json.loads(item["payload"]) for item in store.all("SELECT payload FROM events WHERE job=? ORDER BY seq DESC LIMIT 40", (identifier,))][::-1]
+        return body
 
     @app.post("/api/research/{identifier}/cancel")
     async def cancel_job(identifier: str, request: Request):

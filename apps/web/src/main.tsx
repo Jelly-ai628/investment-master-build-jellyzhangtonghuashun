@@ -93,29 +93,64 @@ function Answer({ report, source, followup }: { report: Report; source: (e: Evid
   const [copied, setCopied] = useState(false)
   const focused = report.presentation === 'sector_ranking'
   const ranked = report.evidence.find(e => e.kind === 'sector_ranking')
-  if (report.presentation === 'message') return <article className="answer"><div className="answer-heading"><span className="answer-symbol"><ChartNoAxesCombined size={18}/></span><strong>市场研判</strong></div><div className="answer-content"><p className="answer-lead">{report.narrative?.summary}</p><div className="followups">{report.followups.map(q => <button key={q} onClick={() => followup(q)}>{q}<ArrowUpRight size={15}/></button>)}</div></div></article>
+  if (report.presentation === 'message') return <article className="answer"><div className="answer-heading"><span className="answer-symbol"><ChartNoAxesCombined size={18}/></span><strong>市场研判</strong>{report.narrative?.author === 'deepseek' && <span className="answer-time" title="这个问题不需要行情数据，回答由 DeepSeek 撰写；服务端已检查其中没有具体行情数字和操作性措辞">DeepSeek 回答 · 本轮未取数</span>}</div><div className="answer-content"><p className="answer-lead message-text">{report.narrative?.summary}</p><div className="followups">{report.followups.map(q => <button key={q} onClick={() => followup(q)}>{q}<ArrowUpRight size={15}/></button>)}</div></div></article>
   const cite = (ids: string[]) => <span className="citations">{ids.map(id => {
     const index = report.evidence.findIndex(item => item.id === id)
     return index < 0 ? null : <button key={id} title={'查看证据 ' + (index + 1)} onClick={() => source(report.evidence[index])}>{index + 1}</button>
   })}</span>
   const copy = async () => {
-    const text = ['市场研究 · 数据截至 ' + report.as_of, report.narrative?.summary || report.narrative_warning, ...report.facts.map(f => f.text), '不确定性：', ...report.uncertainties, '来源：' + [...new Set(report.evidence.map(e => e.provenance.source))].join('、') + '；证据标识：' + report.evidence.map(e => e.id).join('、')].join('\n\n')
+    const text = ['市场研究 · 数据截至 ' + report.as_of, report.narrative?.summary || report.narrative_warning, ...(report.narrative?.paragraphs || []).map(p => p.text), ...report.facts.map(f => f.text), ...(report.narrative?.hypotheses?.length ? ['待验证的假设：', ...report.narrative.hypotheses.map(h => h.text + '（如何验证：' + h.check + '）')] : []), '不确定性：', ...report.uncertainties, '来源：' + [...new Set(report.evidence.map(e => e.provenance.source))].join('、') + '；证据标识：' + report.evidence.map(e => e.id).join('、')].join('\n\n')
     try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 2000) } catch { setCopied(false) }
   }
+  const heading = <><div className="answer-heading"><span className="answer-symbol"><ChartNoAxesCombined size={18}/></span><strong>市场研判</strong><span className="answer-time">截至 {report.as_of}</span></div>
+    {report.notices?.map(line => <div className="notice" key={line}><Info size={17}/><p>{line}</p></div>)}</>
+  const chartOf = (initial?: 'indices' | 'breadth' | 'sectors') => <Suspense fallback={<div className="chart-loading">正在加载图表…</div>}><Chart evidence={focused ? report.evidence.filter(e => e.kind === 'sector_ranking') : report.evidence} onSource={source} initial={initial}/></Suspense>
+  const history = report.evidence.filter(e => e.kind === 'historical_comparison').map(e => <section className="chart-block" key={e.id}><h3>{e.data.name} · 历史阶段对照</h3><div className="table-scroll"><table><thead><tr><th>时期</th><th>区间</th><th>首末变化</th><th>最大回撤</th></tr></thead><tbody>{[e.data.current, e.data.previous].map((p, i) => <tr key={i}><td>{i ? '对照' : '当前'}</td><td>{p?.start_date} — {p?.end_date}</td><td>{p?.window_return_pct.toFixed(2)}%</td><td>{p?.max_drawdown_pct.toFixed(2)}%</td></tr>)}</tbody></table></div><div className="chart-caption"><span>相同交易日长度 · 不外推未来表现</span><button onClick={() => source(e)}>查看来源</button></div></section>)
+  const conditions = <div className="conditions"><h3>哪些条件会改变判断</h3>{report.transition_conditions.map((item, i) => <div key={i}><strong>{item.label}</strong><p>{item.condition}{cite([item.evidence_id])}</p></div>)}</div>
+  const hypotheses = !!report.narrative?.hypotheses?.length && <div className="hypotheses"><h3>待验证的假设</h3><p className="source-note">以下是 DeepSeek 对数据背后原因的推测，属于不确定判断，尚未得到证据验证。</p>{report.narrative.hypotheses.map((item, i) => <div key={i}><span className="dimension-label">假设 · 不确定</span><p>{item.text}{cite(item.evidence_ids)}</p><p className="hypothesis-check">如何验证：{item.check}</p></div>)}</div>
+  const boundary = <><p className="uncertainty-scope">{report.confidence.scope}</p>{report.uncertainties.map((line, i) => <p key={i}>{line}</p>)}<dl className="dimension-status">{report.dimensions.map(item => <div key={item.name}><dt>{item.name}</dt><dd>{item.status}</dd></div>)}</dl></>
+  const footer = <><div className="answer-actions"><button onClick={copy}>{copied ? <Check size={15}/> : <Copy size={15}/>} {copied ? '已复制' : '复制研究摘要'}</button><span>来源可追溯 · 判断存在不确定性</span></div>
+    <div className="followups"><span>继续研究</span>{report.followups.map(q => <button key={q} onClick={() => followup(q)}>{q}<ArrowUpRight size={15}/></button>)}</div></>
+  const paragraphs = report.narrative?.paragraphs
+  if (report.narrative && paragraphs?.length) {
+    // The model chose where charts go; if it placed none, the main chart follows the first paragraph.
+    const placed = paragraphs.some(p => p.chart !== 'none')
+    return <article className="answer">
+      {heading}
+      <div className="answer-content">
+        <div className="summary-meta"><span>{report.market_state ? <>状态：{report.market_state.label}{cite(report.market_state.evidence_ids)}</> : focused ? '近期行业相对表现' : '基于证据的初步观察'}</span><span className="author-label" title="正文、主要矛盾和待验证假设由 DeepSeek 撰写；服务端已核对每段引用的证据、数字与日期，以及研究边界">DeepSeek 撰写 · 引用与数字已核验</span><span className="confidence">置信度 {report.confidence.level}</span></div>
+        <h2 className="state-title">{report.narrative.headline || report.narrative.summary}{cite(report.narrative.summary_evidence_ids || [])}</h2>
+        <div className="prose">{paragraphs.map((p, i) => <React.Fragment key={i}><p>{p.text}{cite(p.evidence_ids)}</p>{p.chart !== 'none' ? chartOf(p.chart) : !placed && i === 0 ? chartOf() : null}</React.Fragment>)}</div>
+        <div className="tension"><span>{focused ? '如何看排序' : '主要矛盾'}</span><p>{report.narrative.main_tension}{cite(report.narrative.tension_evidence_ids || [])}</p></div>
+        {focused && ranked && <section><h3>哪些行业表现居前</h3><div className="table-scroll"><table><thead><tr><th>行业</th><th>近{report.window}日</th><th>近5日</th><th>相对沪深300</th></tr></thead><tbody>{ranked.data.ranking?.slice(0, 10).map(row => <tr key={row.code}><td>{row.rank}. {row.name}</td><td>{row.window_return_pct > 0 ? '+' : ''}{row.window_return_pct.toFixed(2)}%</td><td>{row.five_day_return_pct > 0 ? '+' : ''}{row.five_day_return_pct.toFixed(2)}%</td><td>{row.relative_return_pp > 0 ? '+' : ''}{row.relative_return_pp.toFixed(2)}个百分点</td></tr>)}</tbody></table></div></section>}
+        {history}
+        {hypotheses}
+        {conditions}
+        <details className="uncertainty evidence-details"><summary><Info size={16}/>证据与核验：{report.facts.length} 条已核验事实 · 七维状态 · 数据边界<ChevronDown size={15}/></summary><div>
+          <div className="fact-list"><h3>已核验的事实</h3>{report.facts.map((fact, i) => <p key={i}>{fact.text}{cite(fact.evidence_ids)}</p>)}</div>
+          {!!report.narrative.supplements?.length && <div className="interpretations"><h3>与本问题关系较远的已核验观点</h3>{report.narrative.supplements.map((item, i) => <div key={i}><span className="dimension-label">{item.dimension} · 代码补充</span><p>{item.text}{cite(item.evidence_ids)}</p></div>)}</div>}
+          <h3>不确定性与数据边界</h3>{boundary}
+        </div></details>
+        {footer}
+      </div>
+    </article>
+  }
   return <article className="answer">
-    <div className="answer-heading"><span className="answer-symbol"><ChartNoAxesCombined size={18}/></span><strong>市场研判</strong><span className="answer-time">截至 {report.as_of}</span></div>
+    {heading}
     <div className="answer-content">
       {report.narrative ? <>
-        <div className="summary-meta"><span>{focused ? '近期行业相对表现' : '基于证据的初步观察'}</span><span className="confidence">置信度 {report.confidence.level}</span></div>
+        <div className="summary-meta"><span>{focused ? '近期行业相对表现' : '基于证据的初步观察'}</span><span className="confidence">置信度 {report.confidence.level}</span><span className="author-label" title={report.narrative.author === 'deepseek' ? '摘要、矛盾、解读与假设由 DeepSeek 撰写；服务端已核对每条引用、数字与日期，以及研究边界' : 'DeepSeek 从代码生成的已核验观点中选择与排序'}>{report.narrative.author === 'deepseek' ? 'DeepSeek 撰写 · 引用与数字已核验' : 'DeepSeek 选择已核验观点'}</span></div>
         {report.market_state && <h2 className="state-title">{report.market_state.label}{cite(report.market_state.evidence_ids)}</h2>}
-        <p className="answer-lead">{report.narrative.summary}</p>
-        <div className="tension"><span>{focused ? '如何看排序' : '主要矛盾'}</span><p>{report.narrative.main_tension}</p></div>
+        <p className="answer-lead">{report.narrative.summary}{cite(report.narrative.summary_evidence_ids || [])}</p>
+        <div className="tension"><span>{focused ? '如何看排序' : '主要矛盾'}</span><p>{report.narrative.main_tension}{cite(report.narrative.tension_evidence_ids || [])}</p></div>
       </> : <div className="notice"><Info size={17}/><p>{report.narrative_warning || '解释未通过校验，仅展示已验证事实。'}</p></div>}
       {focused && ranked ? <section><h3>哪些行业表现居前</h3><div className="table-scroll"><table><thead><tr><th>行业</th><th>近{report.window}日</th><th>近5日</th><th>相对沪深300</th></tr></thead><tbody>{ranked.data.ranking?.slice(0, 10).map(row => <tr key={row.code}><td>{row.rank}. {row.name}</td><td>{row.window_return_pct > 0 ? '+' : ''}{row.window_return_pct.toFixed(2)}%</td><td>{row.five_day_return_pct > 0 ? '+' : ''}{row.five_day_return_pct.toFixed(2)}%</td><td>{row.relative_return_pp > 0 ? '+' : ''}{row.relative_return_pp.toFixed(2)}个百分点</td></tr>)}</tbody></table></div><p className="source-note">{ranked.data.scope}有效{ranked.data.valid_count}/{ranked.data.expected_count}个序列。{cite([ranked.id])}</p></section> :
         <div className="fact-list"><h3>已核验的事实</h3>{report.facts.map((fact, i) => <p key={i}>{fact.text}{cite(fact.evidence_ids)}</p>)}</div>}
       <Suspense fallback={<div className="chart-loading">正在加载图表…</div>}><Chart evidence={focused ? report.evidence.filter(e => e.kind === 'sector_ranking') : report.evidence} onSource={source}/></Suspense>
       {report.evidence.filter(e => e.kind === 'historical_comparison').map(e => <section className="chart-block" key={e.id}><h3>{e.data.name} · 历史阶段对照</h3><div className="table-scroll"><table><thead><tr><th>时期</th><th>区间</th><th>首末变化</th><th>最大回撤</th></tr></thead><tbody>{[e.data.current, e.data.previous].map((p, i) => <tr key={i}><td>{i ? '对照' : '当前'}</td><td>{p?.start_date} — {p?.end_date}</td><td>{p?.window_return_pct.toFixed(2)}%</td><td>{p?.max_drawdown_pct.toFixed(2)}%</td></tr>)}</tbody></table></div><div className="chart-caption"><span>相同交易日长度 · 不外推未来表现</span><button onClick={() => source(e)}>查看来源</button></div></section>)}
-      {report.narrative && !focused && <div className="interpretations"><h3>如何理解这些证据</h3>{report.narrative.interpretations.map((item, i) => <div key={i}><span className="dimension-label">{item.dimension} · 归纳</span><p>{item.text}{cite(item.evidence_ids)}</p></div>)}</div>}
+      {report.narrative && !focused && <div className="interpretations"><h3>如何理解这些证据</h3>{report.narrative.interpretations.map((item, i) => <div key={i}><span className="dimension-label">{item.dimension} · 归纳{item.author === 'rules' ? ' · 代码补充' : ''}</span><p>{item.text}{cite(item.evidence_ids)}</p></div>)}</div>}
+      {!!report.narrative?.supplements?.length && <details className="uncertainty evidence-details"><summary><Info size={16}/>与本问题关系较远的已核验观点<ChevronDown size={15}/></summary><div className="interpretations">{report.narrative.supplements.map((item, i) => <div key={i}><span className="dimension-label">{item.dimension} · 代码补充</span><p>{item.text}{cite(item.evidence_ids)}</p></div>)}</div></details>}
+      {hypotheses}
       <div className="conditions"><h3>哪些条件会改变判断</h3>{report.transition_conditions.map((item, i) => <div key={i}><strong>{item.label}</strong><p>{item.condition}{cite([item.evidence_id])}</p></div>)}</div>
       <details className="uncertainty" open><summary><Info size={16}/>不确定性与数据边界<ChevronDown size={15}/></summary><div>
         {report.uncertainties.map((line, i) => <p key={i}>{line}</p>)}
@@ -190,8 +225,9 @@ function App() {
     let closed = false
     const refresh = async () => {
       try {
-        const latest = await api<Job>('/research/' + id)
+        const latest = await api<Job & { progress?: Progress[] }>('/research/' + id)
         if (closed) return
+        if (latest.progress?.length) setEvents(old => [...old, ...latest.progress!.filter(p => !old.some(e => e.seq === p.seq))].sort((a, b) => a.seq - b.seq))
         setJobs(current => current.map(j => j.id === id ? { ...j, ...latest } : j))
         if (!['queued', 'running'].includes(latest.status)) { stream.close(); if (latest.result) setWindowSize(latest.result.window); await loadList() }
       } catch { /* EventSource reconnects; history can restore durable state. */ }
@@ -202,7 +238,7 @@ function App() {
       if (['completed', 'failed', 'cancelled'].includes(item.type)) void refresh()
     }
     stream.onerror = () => { void refresh() }
-    const poll = setInterval(() => { void refresh() }, 5000)
+    const poll = setInterval(() => { void refresh() }, 3000)
     return () => { closed = true; stream.close(); clearInterval(poll) }
   }, [active?.id])
   useEffect(() => {
@@ -267,7 +303,7 @@ function App() {
     </aside>
     <main>
       <header className="topbar"><div><button className="icon-button mobile-only" onClick={() => setSidebar(true)} aria-label="展开历史栏"><Menu size={20}/></button><span className="topbar-label">A 股研究</span>{selected && <><span className="separator">/</span><button className="conversation-title" onClick={rename} title="重命名对话">{selected.title}</button></>}</div><span className="model-label"><span/>DeepSeek</span></header>
-      {about && <div className="about-panel"><button className="icon-button" onClick={() => setAbout(false)} aria-label="关闭研究边界"><X size={17}/></button><strong>先看证据，再理解市场。</strong><p>当前使用扶摇行情与核验市场宽度。iFinD估值等口径仍待核实，缺失维度会明确说明。所有观点仅描述已取得的证据，不作未来涨跌或操作判断。</p></div>}
+      {about && <div className="about-panel"><button className="icon-button" onClick={() => setAbout(false)} aria-label="关闭研究边界"><X size={17}/></button><strong>先看证据，再理解市场。</strong><p>行情、宽度、行业与涨跌停来自扶摇，估值与事件来自 iFinD，均核对日期与口径。事实由代码计算；解读与待验证假设由 DeepSeek 撰写，并经服务端核对引用、数字与研究边界。缺失维度会明确说明，不作未来涨跌或操作判断。</p></div>}
       <div className="conversation-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 160 }}>
         {loginRequired ? <section className="login"><span className="welcome-symbol"><ChartNoAxesCombined size={26}/></span><h1>进入研究空间</h1><p>请输入体验码，开始查看与研究市场。</p><form onSubmit={e => { e.preventDefault(); void bootstrap(accessCode) }}><input type="password" value={accessCode} onChange={e => setAccessCode(e.target.value)} aria-label="体验码" placeholder="体验码"/><button className="primary-button">进入</button></form>{error && <p role="alert">{error}</p>}</section> :
         jobs.length === 0 ? <section className="welcome"><span className="welcome-symbol"><ChartNoAxesCombined size={26}/></span><h1>从一个市场问题开始</h1><p>把行情、参与度与证据放在一起，<br className="mobile-only"/>理解市场正在发生什么。</p><div className="suggestions">{suggestions.map(({ icon: Icon, title, text }) => <button key={title} onClick={() => draft(text)}><Icon size={19}/><span>{title}</span><ArrowUpRight size={14}/></button>)}</div></section> :

@@ -31,8 +31,17 @@ export type Evidence = {
 export type Report = {
   run_id: string; as_of: string; window: number; status: string
   presentation?: 'research' | 'sector_ranking' | 'message'
-  narrative: { summary: string; main_tension: string; interpretations: { text: string; evidence_ids: string[]; dimension: string }[] } | null
+  narrative: {
+    author?: 'deepseek' | 'selection' | 'rules'
+    summary: string; summary_evidence_ids?: string[]; main_tension: string; tension_evidence_ids?: string[]
+    interpretations: { text: string; evidence_ids: string[]; dimension: string; author?: 'deepseek' | 'rules' }[]
+    hypotheses?: { text: string; check: string; evidence_ids: string[] }[]
+    headline?: string
+    paragraphs?: { text: string; evidence_ids: string[]; chart: 'none' | 'indices' | 'breadth' | 'sectors' }[]
+    supplements?: { text: string; evidence_ids: string[]; dimension: string }[]
+  } | null
   narrative_warning?: string
+  notices?: string[]
   market_state?: { label: string; evidence_ids: string[]; scope: string }
   facts: { text: string; evidence_ids: string[] }[]
   confidence: { level: string; scope: string; reasons: string[] }
