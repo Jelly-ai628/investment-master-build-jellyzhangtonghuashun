@@ -140,7 +140,7 @@ cloudflared tunnel --url http://127.0.0.1:8000
 
 勾选项均有实际运行证据；未勾选项为未完成或未验证。
 
-- [x] 可访问、可实际操作的 Web 产品 URL：<https://some-petite-brighton-biggest.trycloudflare.com>（2026-10-07 21:08 完全重启服务与隧道后生成的新网址；临时隧道每次重启都会换网址）。此前的网址 `obtained-stays-substance-kerry` 上，作者输入体验码并完成研究，服务端同一时段记录 3 次研究完成（见测试说明第 5 节）；新网址的外网访问尚待作者确认。可用性依赖作者电脑在线，见"公开访问"。
+- [x] 可访问、可实际操作的 Web 产品 URL：<https://some-petite-brighton-biggest.trycloudflare.com>（2026-10-07 21:08 完全重启服务与隧道后生成的新网址；临时隧道每次重启都会换网址）。此前的网址 `obtained-stays-substance-kerry` 上，作者输入体验码并完成研究，服务端同一时段记录 3 次研究完成（见测试说明第 5 节）；2026-10-07 作者已通过浏览器确认新网址可从外网访问。可用性依赖作者电脑在线，见"公开访问"。
 - [x] 源代码仓库：<https://github.com/Jelly-ai628/investment-master-build-jellyzhangtonghuashun>
 - [x] README 说明目标用户、产品与设计选择、AI 的角色、数据来源、启动方式、环境变量、已知边界及未做事项（本文件）。
 - [x] 主链路实际运行：市场状态框架、取数计划、工具调用、事实与判断区分（见测试说明中的真实运行记录）。
