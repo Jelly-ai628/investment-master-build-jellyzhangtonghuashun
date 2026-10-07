@@ -114,6 +114,7 @@
     <tr><td>2</td><td>源代码仓库与 README</td><td><a href="https://github.com/Jelly-ai628/investment-master-build-jellyzhangtonghuashun">GitHub 仓库</a> · <a href="https://github.com/Jelly-ai628/investment-master-build-jellyzhangtonghuashun/blob/main/README.md">README.md</a></td><td><span class="tag done">已交付</span></td></tr>
     <tr><td>3</td><td>AI 使用与验证记录</td><td><a href="https://github.com/Jelly-ai628/investment-master-build-jellyzhangtonghuashun/blob/main/deliverables/06_AI%E4%BD%BF%E7%94%A8%E4%B8%8E%E9%AA%8C%E8%AF%81%E8%AE%B0%E5%BD%95.md">06_AI使用与验证记录.md</a></td><td><span class="tag done">已交付</span></td></tr>
     <tr><td>4</td><td>测试说明</td><td><a href="https://github.com/Jelly-ai628/investment-master-build-jellyzhangtonghuashun/blob/main/deliverables/05_%E6%B5%8B%E8%AF%95%E8%AF%B4%E6%98%8E.md">05_测试说明.md</a></td><td><span class="tag done">已交付</span> 离线 125 passed · 真实验收 22/22（见第 4 节）</td></tr>
+    <tr><td>5</td><td>演示视频（可选）</td><td>161 秒 · 1920×1080 · 中文配音与字幕；产品思路 + 3 个真实产品案例：市场研判与证据追溯、同一对话继续研究风格与行业、合规与数据边界<br>作者本机文件 <code>work/video/market-research-demo.mp4</code></td><td><span class="tag done">已制作</span> 由 Claude Code 制作 <span class="tag limit">尚未发布</span></td></tr>
   </tbody>
 </table>
 </div>
@@ -191,7 +192,7 @@
   <thead><tr><th>工具</th><th>时间</th><th>做了什么</th></tr></thead>
   <tbody>
     <tr><td><b>Codex</b>（ChatGPT，OpenAI）</td><td>约 12:00–14:30，前半程主力</td><td>把需求写入 README 与 AGENTS.md；核查工具包与数据源，制定产品与技术规划；编写连接探针，真实验证 DeepSeek、扶摇、iFinD；编写 PRODUCT/DESIGN；完成第一版可运行产品：前后端、研究编排、扶摇数据层、确定性指标、证据追溯、离线测试、Dockerfile</td></tr>
-    <tr><td><b>Claude Code</b>（Anthropic）</td><td>14:36 起接手</td><td>核对 README 与代码是否一致；接入估值与事件工具；编写真实验收脚本（现为 22 个用例），并按结果修正问题；编写测试说明与 AI 记录；部署准备：git 仓库、密钥扫描、本机 + Cloudflare 隧道；按用户试用反馈定位并修复个股检索、一般问答和回答质量问题</td></tr>
+    <tr><td><b>Claude Code</b>（Anthropic）</td><td>14:36 起接手</td><td>核对 README 与代码是否一致；接入估值与事件工具；编写真实验收脚本（现为 22 个用例），并按结果修正问题；编写测试说明与 AI 记录；部署准备：git 仓库、密钥扫描、本机 + Cloudflare 隧道；按用户试用反馈定位并修复个股检索、一般问答和回答质量问题；制作 161 秒演示视频：撰写分镜与旁白，用 Playwright 脚本驱动本机 Chrome 对真实产品录屏（另起本地演示服务，未改动公开网址的服务），用 macOS 系统语音配音，用 AVFoundation 脚本剪辑、标注加速倍数并合成字幕，逐帧检查关键画面</td></tr>
     <tr><td><b>DeepSeek</b> <code>deepseek-flash</code></td><td>产品运行时</td><td>意图识别；取数规划与工具调用；<b>撰写用户看到的回答正文（一句话结论 + 1–4 段）、主要矛盾、待验证假设和继续研究的问题，并决定图表放在哪段</b>，经服务端核验后展示；<b>直接回答不需要取数的一般问题</b>（产品能做什么、概念解释）；撰写都未通过时按 ID 选择已核验观点。<b>不生成事实</b>，事实与状态标签由代码计算</td></tr>
   </tbody>
 </table>
@@ -217,6 +218,7 @@
     <tr><td>19</td><td>用户试用指出，Claude Code 定位根因并修正</td><td>“中国移动”无法研究；“你可以研究哪些个股”只回固定文字；回答仍不讲人话、不扣题、结构僵化。根因：名称只检索一次且要求完全一致，停牌一天就整轮失败；一般问题从不调用模型；每条观点自带免责尾巴、提示词要求单独写局限段、数字必须逐字照抄、主要矛盾只有口径说明、只问部分维度也强制取全部维度</td><td>名称多级检索、简称唯一匹配、停牌日不补值；新增一般问答；观点拆为“说明了什么 / 不能说明什么”；新增数据型矛盾（如指数跌 5.5% 而上涨占比 46.17%）；提示词改为先答问题、只写相关证据；数字允许四舍五入；“只说明……”只取所问维度</td></tr>
     <tr><td>20</td><td>真实验收与用户试用发现，Claude Code 修正</td><td>扶摇代码表中 600941 的名称是交易所简称“XD中国移”（XD 为除息标记，名称被截为 4 个字），所以“中国移动”按名称检索为空；一般问答两稿被拒后退回固定文字；撰写稿常因结构写坏被拒：把一份回答拆成多次调用、嵌套的 headline / main_tension 对象写错</td><td>名称匹配去掉 XD/XR/DR/N/C 等标记、支持截短简称，以用户说的名称展示并写明代码表简称；一般问答只拒绝建议措辞和凭空数字；多次调用合并为一份草稿，headline 与 main_tension 改为平铺字段；越界的继续研究问题只删除不重写；拒绝原因全部落盘</td></tr>
     <tr><td>21</td><td>用户试用指出，Claude Code 修正</td><td>“A股最近有哪些表现比较好的股票标的”显示 timeout：问题被识别成行业排名（实为选股，本产品不做），且一次扶摇读取请求 40 秒未返回，整次研究失败，界面直接显示错误码</td><td>选股类问题改由 DeepSeek 说明边界并引导到行业排名或点名个股；只读请求每次最多等 20 秒、失败自动重试一次；错误码改为中文说明</td></tr>
+    <tr><td>22</td><td>录制演示视频时发现，Claude Code 修正</td><td>“预测明天沪深300会涨还是跌，并给我仓位建议”被合规拦截后，界面按研究报告排版：标注“DeepSeek 选择已核验观点”（实际是规则拦截，没有调用 DeepSeek），并出现三个空标题</td><td>拦截结果按普通说明展示边界与继续研究的问题，补充测试断言（125 passed）；公开网址的服务需重启后生效</td></tr>
   </tbody>
 </table>
 </div>
@@ -475,7 +477,8 @@
   <li>常驻的云端部署与固定网址。</li>
   <li>估值历史分位、融资余额与利率、宏观数据、全量政策与公告事件。</li>
   <li>历史日期的市场宽度与涨跌停。</li>
-  <li>浏览器端自动化测试。</li>
+  <li>浏览器端自动化测试（录制演示视频时用脚本走完 3 个案例，但没有断言，不算自动化测试）。</li>
+  <li>演示视频的发布（目前只有作者本机文件）。</li>
 </ul>
 
 <footer>本页位于仓库 <code>deliverables/delivery-overview.html</code>，内容与 README、05 测试说明、06 AI 使用与验证记录保持一致；如产品网址变更，以 README 为准。</footer>
