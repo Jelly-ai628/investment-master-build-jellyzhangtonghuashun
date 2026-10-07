@@ -298,31 +298,37 @@
 
 <!-- ============ 5. 技术架构 ============ -->
 <h2 id="arch">5. 技术架构</h2>
-<p>单个容器服务，FastAPI 同源托管前端静态文件和 API。I/O 全部异步；研究任务由一个有界的 Agent 运行器执行，状态机明确，可以取消，也可以追溯。</p>
+<p>单进程服务：FastAPI 同源托管前端静态文件和 API，可打包为单个容器（<code>Dockerfile</code>），当前在作者本机直接运行并经 Cloudflare 临时隧道对外。I/O 全部异步；一次研究由一个有界的运行器按固定顺序执行，可以取消，每一步都写入事件记录，可以追溯。</p>
 
-<div class="arch" role="img" aria-label="系统架构图：浏览器经 HTTPS 访问 FastAPI；研究运行器调用 DeepSeek 与白名单工具；工具接扶摇 REST 与 iFinD MCP；确定性计算生成证据与事实；结果存入 SQLite 并经 SSE 返回前端">
+<div class="arch" role="img" aria-label="系统架构图：浏览器经隧道访问 FastAPI；合规拦截后由 DeepSeek 识别意图；不需要取数的问题由 DeepSeek 直接回答，研究问题先由代码确认交易日、匹配对象、计算必需工具，再由 DeepSeek 在白名单内规划取数；工具接扶摇 REST 与 iFinD MCP；代码计算事实、候选观点和主要矛盾；DeepSeek 撰写回答并经服务端核验；结果存入 SQLite">
   <div class="row"><div class="box"><b>浏览器 · React 19 + TypeScript + Vite + ECharts</b><span>左侧对话历史 / 中央 AI 对话 / 证据抽屉 / 图表与数据表切换</span></div></div>
-  <div class="arrow">↓ HTTPS（Cloudflare 隧道）· REST + SSE 进度流</div>
+  <div class="arrow">↓ HTTPS（Cloudflare 临时隧道）· REST + SSE 进度流；隧道缓冲事件流时，由轮询接口带回进度</div>
   <div class="row"><div class="box"><b>FastAPI 同源服务</b><span>体验码会话 · 同源校验 · 对话与任务 · 每会话每小时 20 次 · 同时 1 个研究 · 240 秒超时</span></div></div>
   <div class="arrow">↓</div>
-  <div class="row r3">
-    <div class="box"><b>合规拦截</b><span>规则匹配涨跌预测、仓位、买卖类问题，直接返回边界说明</span></div>
-    <div class="box ai"><b>研究运行器 ⇄ DeepSeek</b><span>意图识别 → 一般问题直接回答（不取数）/ 研究问题取数规划 → 白名单工具调用（最多 4 轮、10 次）</span></div>
-    <div class="box"><b>研究技能</b><span>研究协议每次加载，其余按问题加载，指导取数规划与撰写解读</span></div>
-  </div>
-  <div class="arrow">↓ 参数逐项校验 · 服务端计算最低必需工具集</div>
   <div class="row r2">
-    <div class="box"><b>扶摇 REST 适配器</b><span>交易日历、指数/行业/个股日线、全市场快照 + 日 K、涨跌停池、行业目录</span></div>
+    <div class="box"><b>① 合规拦截（代码规则）</b><span>涨跌预测、仓位、买卖类问题直接返回边界说明，不取数、不调用模型</span></div>
+    <div class="box ai"><b>② 意图识别（DeepSeek + 代码兜底）</b><span>判断问题类型和点名对象，可附 6 位代码作检索线索；选股类问题、问到风险的数据问题由代码纠正</span></div>
+  </div>
+  <div class="arrow">↓ 不需要取数（能力、概念、选股类、闲聊）　｜　需要取数的研究问题 ↓</div>
+  <div class="row r2">
+    <div class="box ai"><b>③a 一般问答（DeepSeek）</b><span>按产品能力说明直接回答，界面标注“本轮未取数”；核验：不得出现具体行情数字、日期和操作措辞，越界的继续研究问题只删除；两稿未通过退回固定说明</span></div>
+    <div class="box"><b>③b 研究准备（代码）</b><span>交易日历确认截至日与窗口；指数、行业目录与扶摇代码表匹配对象（去掉 XD 等标记、支持截短简称，多只候选时请用户选择）；按问题加载研究技能；计算最低必需工具集，“只说明……”只取所问维度</span></div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="row"><div class="box ai"><b>④ 取数规划（DeepSeek）</b><span>在本次开放的白名单工具中选择调用并写明用途，最多 4 轮、10 次；参数逐项校验，必需工具没有全部尝试就不出结论</span></div></div>
+  <div class="arrow">↓ 只读请求每次最多等 20 秒，失败自动重试一次；接口失败如实记录，不换对象凑数</div>
+  <div class="row r2">
+    <div class="box"><b>扶摇 REST 适配器</b><span>交易日历、标的检索、指数/行业/个股日线（个股前复权）、全市场快照 + 日 K、涨跌停池、行业目录、个股估值快照</span></div>
     <div class="box"><b>iFinD MCP 适配器</b><span>宽基指数 PE(TTM)/PB；新闻检索 + 原网页标题与日期核对</span></div>
   </div>
   <div class="arrow">↓ 原始响应存档（0600）· provenance</div>
   <div class="row r3">
-    <div class="box"><b>确定性计算</b><span>区间变化、回撤、均线、宽度、排名、状态标签、切换条件</span></div>
-    <div class="box"><b>候选观点与主要矛盾</b><span>代码生成，“说明了什么”和“不能说明什么”分开；主要矛盾分数据背离与口径说明两类</span></div>
-    <div class="box ai"><b>DeepSeek 撰写回答</b><span>先回答问题：一句话结论 + 1–4 段正文、配图位置、主要矛盾、待验证假设、继续研究问题；只写与问题有关的证据，每段引用观点 ID</span></div>
+    <div class="box"><b>⑤ 确定性计算（代码）</b><span>区间变化、回撤、均线、区间位置、宽度、成交节奏、排名、状态标签、判断改变条件；停牌日不补值</span></div>
+    <div class="box"><b>⑥ 候选观点与主要矛盾（代码）</b><span>“说明了什么”和“不能说明什么”分开；主要矛盾分数据背离与口径说明两类</span></div>
+    <div class="box ai"><b>⑦ 撰写回答（DeepSeek）</b><span>先回答问题：一句话结论 + 1–4 段正文、配图位置、主要矛盾、待验证假设、继续研究问题；只写与问题有关的证据，每段引用观点 ID；只加载研究技能中读证据的部分</span></div>
   </div>
-  <div class="arrow">↓ 服务端核验：引用存在 · 数字与日期来自依据（可四舍五入）· 正负方向 · 无预测与建议措辞 · 问题被回答；未通过则带着问题清单重写，最多 3 稿，仍不通过则改为 DeepSeek 按 ID 选择，再不通过只展示事实</div>
-  <div class="row"><div class="box"><b>SQLite（会话 · 对话 · 任务 · 事件）+ <code>work/raw/</code> 原始记录</b><span>重启后未完成任务标记为中断；证据原始记录只对所有者分页可见</span></div></div>
+  <div class="arrow">↓ 服务端核验：引用存在 · 数字与日期来自依据（可四舍五入）· 正负方向 · 无预测与建议措辞 · 问题被回答；多次调用先合并为一份草稿；未通过则带着问题清单重写，最多 3 稿，仍不通过则改为 DeepSeek 按 ID 选择，再不通过只展示事实</div>
+  <div class="row"><div class="box"><b>SQLite（会话 · 对话 · 任务 · 事件）+ <code>work/raw/</code> 原始记录 + <code>work/research-runs/</code> 研究存档</b><span>重启后未完成任务标记为中断；证据原始记录只对所有者分页可见；撰写和一般问答被拒的原因写入 <code>work/validation-attempts/</code></span></div></div>
   <p class="legend">绿色框为 DeepSeek 参与的环节，其余由代码确定性完成。</p>
 </div>
 
@@ -348,9 +354,10 @@
   <thead><tr><th>环节</th><th>由谁完成</th><th>约束</th></tr></thead>
   <tbody>
     <tr><td>1. 合规拦截</td><td>代码（规则）</td><td>涨跌预测、仓位、买卖建议类问题直接返回边界说明，不取数</td></tr>
-    <tr><td>2. 意图识别</td><td>DeepSeek 强制工具调用 + 代码兜底</td><td>用户点名的证券或无法匹配的对象，不会被默认指数替代；模型可给出 6 位代码作检索线索，代码表中该代码的名称与用户所说一致才采用</td></tr>
+    <tr><td>2. 意图识别</td><td>DeepSeek 强制工具调用 + 代码兜底</td><td>用户点名的证券或无法匹配的对象，不会被默认指数替代；模型可给出 6 位代码作检索线索，代码表中该代码的名称与用户所说一致才采用；问哪些股票表现好、选股荐股的问题由代码改为一般问答</td></tr>
     <tr><td>2b. 一般问答（不取数）</td><td><b>DeepSeek 撰写</b></td><td>按产品能力说明回答；不得出现具体行情数字、日期、预测和操作措辞；两次未通过退回固定说明</td></tr>
-    <tr><td>3. 取数规划与工具调用</td><td>DeepSeek</td><td>只能调用白名单工具，参数逐项校验；服务端计算最低必需工具集，没覆盖就不出结论</td></tr>
+    <tr><td>2c. 研究准备：截至日、对象、必需工具</td><td>代码（确定性）</td><td>交易日历确认截至日与窗口；指数、行业目录和扶摇代码表匹配对象（去掉 XD 等标记、支持截短简称，多只候选时请用户选择）；按问题加载研究技能；计算最低必需工具集，只问部分维度时只取所问维度</td></tr>
+    <tr><td>3. 取数规划与工具调用</td><td>DeepSeek</td><td>只能调用本次开放的白名单工具，参数逐项校验；必需工具没有全部尝试就不出结论；只读请求每次最多等 20 秒、失败自动重试一次</td></tr>
     <tr><td>4. 指标、事实、状态标签、切换条件</td><td>代码（确定性）</td><td>每条事实绑定证据 ID 和原始字段</td></tr>
     <tr><td>5. 候选观点与主要矛盾</td><td>代码生成</td><td>每条观点分为“说明了什么”和“不能说明什么”；主要矛盾分为数据背离（如指数走弱而上涨占比不低、缩量下跌、涨停远多于跌停）与口径说明</td></tr>
     <tr><td>6. 回答正文、主要矛盾、配图位置</td><td><b>DeepSeek 撰写</b></td><td>每段引用观点 ID；数字和日期必须来自所依据的观点或同一证据的已核验事实，可以四舍五入，正负方向不能写反；不得出现预测和操作建议措辞；用户问的维度必须被回答；同一张图只配一次。未通过时带着问题清单重写，最多 3 稿</td></tr>
