@@ -1,0 +1,15 @@
+.DS_Store
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+apps/web/dist/
+deliverables/release/
+*.py[cod]
+.env*
+!.env.example
+work/
+.claude/settings.local.json
+# Original third-party material needs credential/data/license review before publication.
+investment-masters-toolkit/
+investment-masters-toolkit.zip

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "market-research",
+      "runtimeExecutable": "/Users/user/investment-master-build/.venv/bin/uvicorn",
+      "runtimeArgs": ["market_research.app:create_app", "--factory", "--app-dir", "apps/api", "--host", "127.0.0.1", "--port", "8000"],
+      "port": 8000
+    }
+  ]
+}

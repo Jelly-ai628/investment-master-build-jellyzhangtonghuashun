@@ -1,0 +1,11 @@
+.git
+.env*
+.venv
+work
+**/__pycache__
+**/node_modules
+apps/web/dist
+investment-masters-toolkit
+investment-masters-toolkit.zip
+deliverables/release
+.DS_Store
