@@ -13,6 +13,20 @@ const errors: Record<string, string> = {
   no_verified_research_evidence: '没有取得足以核验的证据，本次未生成正常结论。',
   rate_limited: '数据服务暂时限流，请稍后重试。',
   narrative_boundary_violation: '解释未通过边界检查，未展示该解释。',
+  timeout: '数据或模型服务响应超时（已自动重试一次），本次没有生成结论。请稍后重试。',
+  network_error: '连接数据或模型服务失败（已自动重试一次），本次没有生成结论。请稍后重试。',
+  upstream_timeout: '数据服务上游超时，本次没有生成结论。请稍后重试。',
+  upstream_http_error: '数据或模型服务返回错误，本次没有生成结论。请稍后重试。',
+  upstream_error: '数据服务上游出错，本次没有生成结论。请稍后重试。',
+  authentication_or_permission_denied: '数据或模型服务的密钥无效或无权限，本次没有取数。',
+  permission_denied: '数据服务拒绝了本次请求（权限不足），本次没有取数。',
+  deepseek_not_configured: '服务端未配置 DeepSeek，无法进行研究。',
+  intent_not_resolved: '没能识别这个问题要研究什么，请换个说法再试。',
+  calendar_not_current: '交易日历不是最新的，为避免使用过期数据，本次没有生成结论。',
+  security_history_not_obtained: '没有取到这只股票自己的行情，为避免用其他对象代替，本次没有生成结论。',
+  sector_ranking_not_obtained: '没有取到行业排名数据，本次没有生成结论。',
+  invalid_research_tool_call: '模型给出的取数请求不合规，已被拦截，本次没有生成结论。请重试。',
+  tool_budget_exceeded: '取数次数超过上限，本次没有生成结论。请把问题拆小一些再试。',
 }
 async function api<T>(path: string, body?: unknown, method?: string): Promise<T> {
   const response = await fetch('/api' + path, {

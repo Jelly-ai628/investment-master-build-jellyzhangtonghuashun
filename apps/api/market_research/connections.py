@@ -57,12 +57,20 @@ class Settings:
 
 
 async def request_json(client: httpx.AsyncClient, method: str, url: str, **kwargs: Any) -> dict:
-    try:
-        response = await client.request(method, url, **kwargs)
-    except httpx.TimeoutException:
-        raise ProbeError("timeout") from None
-    except httpx.RequestError:
-        raise ProbeError("network_error") from None
+    # Read-only GETs get a shorter wait and one retry: live 2026-10-07, a single stalled provider call failed a whole research run.
+    attempts = 2 if method == "GET" else 1
+    if method == "GET":
+        kwargs.setdefault("timeout", 20)
+    for attempt in range(attempts):
+        try:
+            response = await client.request(method, url, **kwargs)
+            break
+        except httpx.TimeoutException:
+            if attempt + 1 == attempts:
+                raise ProbeError("timeout") from None
+        except httpx.RequestError:
+            if attempt + 1 == attempts:
+                raise ProbeError("network_error") from None
     check_http_status(response.status_code)
     try:
         body = response.json()

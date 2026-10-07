@@ -20,7 +20,8 @@ class ResearchIntent(BaseModel):
 
 
 INTENT_INSTRUCTIONS = """只识别问题意图，不回答问题。
-- 询问哪些板块/行业最近更强、势头较好、领涨、热点或排名：sector_ranking，不能是market_overview。没有指定具体板块时entities留空，绝不自选银行或半导体。板块未明确概念时先按industry。
+- 询问哪些板块/行业最近更强、势头较好、领涨、热点或排名：sector_ranking，不能是market_overview。
+- 询问哪些股票/个股/标的表现好、涨得多、值得关注，或要求选股、荐股、股票名单：chat（本产品不做个股筛选和推荐），不能当成sector_ranking或market_overview。没有指定具体板块时entities留空，绝不自选银行或半导体。板块未明确概念时先按industry。
 - 对指定行业/指数的比较：named_comparison，利用上下文解析“第一个/它/这些”。
 - 询问具体公司或单只股票（如贵州茅台、宁德时代、中国移动、600519）的涨跌、走势、表现、估值：single_security，entities写用户说的证券名，不能改成指数或market_overview。entity_codes按entities的顺序填写你确知的6位A股代码，不确定就填空字符串；代码只用于检索，服务端会核对名称。
 - 询问近期或末日的涨跌停分布、风险信号、情绪、极端交易等实际市场情况：risk_research。
@@ -54,8 +55,15 @@ DEFINITIONAL = re.compile(r"什么是|是什么|含义|意思|定义|怎么理�
 RISK_WORDS = re.compile(r"风险|情绪|涨停|跌停|极端")
 
 
+# Asking which individual stocks did best is stock screening, which the product does not do; it is not a sector ranking.
+STOCK_PICKING = re.compile(r"(?:哪些|哪只|哪几只)[^，。？?]{0,12}(?:股票|个股|标的)|什么(?:股票|个股|标的)|选股|荐股|推荐.{0,4}(?:股票|个股|标的)|股票名单|牛股|妖股")
+SECTOR_WORDS = re.compile(r"板块|行业|赛道")
+
+
 def override_explanation(intent: ResearchIntent, question: str) -> ResearchIntent:
     # A data question must not be answered with a canned definition just because it mentions a concept.
+    if intent.task in ("sector_ranking", "market_overview") and STOCK_PICKING.search(question) and not SECTOR_WORDS.search(question):
+        return intent.model_copy(update={"task": "chat", "entities": [], "entity_codes": []})
     if intent.task in ("explanation", "chat") and not DEFINITIONAL.search(question) and RISK_WORDS.search(question):
         return intent.model_copy(update={"task": "risk_research", "explanation_topic": "none"})
     return intent

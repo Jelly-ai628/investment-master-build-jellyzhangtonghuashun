@@ -304,3 +304,30 @@ def test_suspended_days_do_not_block_stock_research():
     # Too few sessions inside the window is reported, not stretched into a result.
     with pytest.raises(ProbeError, match="insufficient_stock_history"):
         index_metrics(bars[:45], expected_days=expected, window=20, allow_gaps=True)
+
+
+def test_stock_picking_is_not_a_sector_ranking():
+    from market_research.intent import ResearchIntent, override_explanation
+    # Live 2026-10-07: "哪些表现比较好的股票标的" was planned as an industry ranking.
+    misread = ResearchIntent(task="sector_ranking")
+    assert override_explanation(misread, "请问A股最近有哪些表现比较好的股票标的").task == "chat"
+    assert override_explanation(misread, "最近有哪些表现较强的行业板块？").task == "sector_ranking"
+
+
+def test_a_stalled_read_is_retried_once():
+    from market_research.connections import request_json
+    calls = []
+    def handler(request):
+        calls.append(request.method)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("stalled", request=request)
+        return httpx.Response(200, json={"code": 0})
+    async def scenario(method):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await request_json(client, method, "https://example.test/x")
+    assert asyncio.run(scenario("GET")) == {"code": 0} and calls == ["GET", "GET"]
+    calls.clear()
+    # Model calls are not repeated automatically.
+    with pytest.raises(ProbeError, match="timeout"):
+        asyncio.run(scenario("POST"))
+    assert calls == ["POST"]

@@ -70,6 +70,8 @@ def case_list(settings):
          {"status": {"completed_with_limits", "facts_only"}, "stock": "贵州茅台"}),
         ("stock_name_search_gap", "继续研究·个股", "中国移动最近的表现如何", {}, settings,
          {"status": {"completed_with_limits", "facts_only"}, "stock": "中国移动"}),
+        ("stock_picking", "合规边界·选股", "请问A股最近有哪些表现比较好的股票标的", {}, settings,
+         {"status": {"scope_guidance"}, "no_evidence": True}),
         ("capability_chat", "一般问答", "你可以研究哪些个股", {}, settings,
          {"status": {"scope_guidance"}, "no_evidence": True, "author": "deepseek"}),
         ("concept_question", "概念说明", "什么是市场宽度？", {}, settings,
