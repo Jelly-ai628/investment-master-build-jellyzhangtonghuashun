@@ -75,3 +75,41 @@ def test_history_and_risk_are_separate_evidence_kinds():
     insights, _ = candidates(data)
     assert any(item["dimension"] == "历史阶段" and item["evidence_ids"] == ["history"] for item in insights.values())
     assert any(item["dimension"] == "风险变量" and item["evidence_ids"] == ["risk"] for item in insights.values())
+
+
+def test_range_position_describes_closing_range_only():
+    data = sample()
+    data["ev_index"]["data"]["series"] = [{"date": d, "close": c} for d, c in
+                                          (("2026-09-01", 100), ("2026-09-15", 110), ("2026-09-30", 95), ("2026-09-29", 90))]
+    data["ev_index"]["data"]["series"].sort(key=lambda row: row["date"])
+    insights, _ = candidates(data)
+    text = insights["range_0"]["text"]
+    # closes 100, 110, 90, 95: last 95 sits 25% up the 90-110 range.
+    assert "最低90.00点、最高110.00点" in text and "自低到高的25%处" in text
+    assert "较区间最高收盘-13.64%" in text and "较最低收盘+5.56%" in text
+    assert "不是支撑位或压力位" in text and insights["range_0"]["dimension"] == "行情结构"
+    flat = sample()
+    flat["ev_index"]["data"]["series"] = [{"date": "2026-09-29", "close": 1}, {"date": "2026-09-30", "close": 1}]
+    assert "range_0" not in candidates(flat)[0]
+
+
+def test_turnover_trend_needs_six_days_and_is_exact():
+    assert "turnover_trend" not in candidates(sample())[0]
+    data = sample()
+    data["ev_breadth"]["data"]["turnover_history"] = [
+        {"date": f"2026-09-{day:02d}", "turnover_cny": value * 1e8, "valid_count": count}
+        for day, value, count in ((23, 100, 5000), (24, 120, 5010), (25, 110, 5005), (26, 130, 5020), (29, 140, 5015), (30, 160, 5030))]
+    item = candidates(data)[0]["turnover_trend"]
+    # Last five average 132; six-day average 126.67; expansions on 24, 26, 29, 30.
+    assert "日均成交额132亿元" in item["text"] and "日均127亿元的104.2%" in item["text"]
+    assert "有4天较前一日放大" in item["text"] and "5000至5030只" in item["text"]
+    assert "不代表资金净流入" in item["text"] and item["dimension"] == "流动性"
+
+
+def test_full_overview_selection_fits_the_detail_limit():
+    # Live acceptance 2026-10-07 (skills v2): the model picked nine details for an overview and the old limit of eight rejected it.
+    ids = ["index_0", "range_0", "participation", "turnover", "turnover_trend", "risk_2", "valuation_3", "coverage", "events_4"]
+    selection = InsightSelection.model_validate({"summary_ids": ["index_0", "participation"], "tension_id": "different_windows", "detail_ids": ids})
+    assert len(selection.detail_ids) == 9
+    with pytest.raises(Exception):
+        InsightSelection.model_validate({"summary_ids": ["index_0"], "tension_id": "x", "detail_ids": ids + ["a", "b"]})

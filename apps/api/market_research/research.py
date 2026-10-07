@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .connections import Settings, ProbeError, DEEPSEEK, SHANGHAI, request_json, first_message
 from .market_data import MarketData, INDICES, private_json
-from .insights import InsightSelection, candidates, render_selection
+from .insights import MAX_DETAILS, InsightSelection, candidates, render_selection
 from .intent import classify_question
 from .sector_ranking import ranking_answer
 
@@ -37,6 +37,26 @@ def asks_for_prohibited_output(question: str) -> bool:
 
 MARKET_WORDS = re.compile(r"A股|大盘|市场|股市|两市|沪深两市|全市场|整体市场|A股市场")
 IFIND_TOOL_TIMEOUT = 50
+SKILL_VERSION = "research-skills-v2"
+
+
+def select_skills(task: str, question: str, *, stock: bool, industries: bool, history: bool,
+                  risk: bool, valuation: bool, events: bool) -> list[str]:
+    # The protocol always applies; each topic skill is loaded only when its evidence is in this plan.
+    names = ["research-protocol", "security-context" if stock else "market-state"]
+    if task == "named_comparison" or re.search("比较|对比|大小盘|风格", question):
+        names.append("comparison")
+    if industries or task == "sector_ranking":
+        names.append("industry-context")
+    if history:
+        names.append("history-context")
+    if risk:
+        names.append("risk-context")
+    if valuation or stock:
+        names.append("valuation-boundary")
+    if events:
+        names.append("event-context")
+    return names
 
 
 async def bounded(coroutine):
@@ -243,33 +263,22 @@ async def run_research(request: ResearchRequest, settings: Settings, root: Path,
         wants_valuation = intent.task not in ("sector_ranking", "single_security") and (intent.task in ("market_overview", "valuation") or bool(re.search("估值|市盈率|市净率|PE|PB", request.question, re.I)))
         wants_events = intent.task != "sector_ranking" and (intent.task in ("market_overview", "events") or bool(re.search("事件|政策|新闻|央行|公告|逆回购", request.question)))
         await event("scope", as_of=data.expected_day, window=request.window, latest_day=data.latest_day, comparison_end_date=comparison_end, industries=industry_names, securities=securities)
-        skill_names = ["market-state"]
-        if (root / "research-skills" / "valuation-boundary.md").exists():
-            skill_names.append("valuation-boundary")
-        if re.search("比较|对比|大小盘|风格", request.question):
-            skill_names.append("comparison")
-        if industry_names or intent.task == "sector_ranking":
-            skill_names.append("industry-context")
-        if comparison_end:
-            skill_names.append("history-context")
-        if wants_risk:
-            skill_names.append("risk-context")
-        if wants_events:
-            skill_names.append("event-context")
+        skill_names = select_skills(intent.task, request.question, stock=bool(securities), industries=bool(industry_names),
+                                    history=bool(comparison_end), risk=wants_risk, valuation=wants_valuation, events=wants_events)
         loaded_skills = [name for name in skill_names if (root / "research-skills" / (name + ".md")).exists()]
         skill = "\n\n".join((root / "research-skills" / (name + ".md")).read_text() for name in loaded_skills)
         messages = [{"role": "system", "content": skill + "\n你是只读取证的市场研究Agent。按已识别的问题意图选择工具，不套用大盘报告。行业排名必须用get_sector_ranking，不能拿宽基指数或随意选几个行业代替。每个purpose说明取数用途，不输出内部思考。已取得的工具不要重复调用。接口失败明确记录。研究个股时用get_stock_history取该股行情，沪深300只作为大盘对照，不能用指数代替个股。"},
                     {"role": "user", "content": json.dumps({"question": request.question, "conversation_context": request.context, "verified_end_date": data.expected_day, "return_intervals": request.window, "comparison_end": comparison_end, "selected_industries": industry_names, "selected_securities": securities}, ensure_ascii=False)}]
         tools = [
             {"type": "function", "function": {"name": "get_market_breadth", "description": "最新完整交易日的核验市场宽度与成交活跃度；历史日期不支持快照宽度。", "parameters": {"type": "object", "properties": {"purpose": {"type": "string"}}, "required": ["purpose"], "additionalProperties": False}}},
-            {"type": "function", "function": {"name": "get_index_history", "description": "获取并计算研究区间的指数点位表现、回撤、均线，服务器固定研究日期和窗口。", "parameters": {"type": "object", "properties": {"code": {"type": "string", "enum": list(INDICES)}, "purpose": {"type": "string"}}, "required": ["code", "purpose"], "additionalProperties": False}}},
+            {"type": "function", "function": {"name": "get_index_history", "description": "获取并计算研究区间的指数点位表现、回撤、均线与区间收盘高低点位置，服务器固定研究日期和窗口。", "parameters": {"type": "object", "properties": {"code": {"type": "string", "enum": list(INDICES)}, "purpose": {"type": "string"}}, "required": ["code", "purpose"], "additionalProperties": False}}},
         ]
         if intent.task == "sector_ranking":
             tools = [{"type": "function", "function": {"name": "get_sector_ranking", "description": "对同口径的行业样本实际取数，按选定区间累计表现排名，并比较近5日表现与沪深300相对强弱。", "parameters": {"type": "object", "properties": {"purpose": {"type": "string"}}, "required": ["purpose"], "additionalProperties": False}}}]
         if industry_names:
             tools.append({"type": "function", "function": {"name": "get_industry_history", "description": "研究所选同花顺行业指数的同区间表现。", "parameters": {"type": "object", "properties": {"industry": {"type": "string", "enum": industry_names}, "purpose": {"type": "string"}}, "required": ["industry", "purpose"], "additionalProperties": False}}})
         if securities:
-            tools.append({"type": "function", "function": {"name": "get_stock_history", "description": "经扶摇获取所选A股的前复权日K，计算同一研究区间的首末变化、回撤与均线。", "parameters": {"type": "object", "properties": {"code": {"type": "string", "enum": list(securities)}, "purpose": {"type": "string"}}, "required": ["code", "purpose"], "additionalProperties": False}}})
+            tools.append({"type": "function", "function": {"name": "get_stock_history", "description": "经扶摇获取所选A股的前复权日K，计算同一研究区间的首末变化、回撤、均线与区间收盘高低点位置。", "parameters": {"type": "object", "properties": {"code": {"type": "string", "enum": list(securities)}, "purpose": {"type": "string"}}, "required": ["code", "purpose"], "additionalProperties": False}}})
             tools.append({"type": "function", "function": {"name": "get_stock_valuation", "description": "经扶摇读取所选A股的最新PE/PB估值快照；不提供历史估值或高低估结论。", "parameters": {"type": "object", "properties": {"code": {"type": "string", "enum": list(securities)}, "purpose": {"type": "string"}}, "required": ["code", "purpose"], "additionalProperties": False}}})
         if comparison_end:
             tools.append({"type": "function", "function": {"name": "compare_history", "description": "比较当前与指定历史截至日期的相同长度区间。", "parameters": {"type": "object", "properties": {"code": {"type": "string", "enum": list(INDICES)}, "purpose": {"type": "string"}}, "required": ["code", "purpose"], "additionalProperties": False}}})
@@ -436,7 +445,7 @@ async def run_research(request: ResearchRequest, settings: Settings, root: Path,
                     summary = [key for key in selection.summary_ids if key in insights]
                     if not summary:
                         raise ProbeError("unknown_insight_selection")
-                    details = list(dict.fromkeys(summary + [key for key in selection.detail_ids if key in insights]))[:8]
+                    details = list(dict.fromkeys(summary + [key for key in selection.detail_ids if key in insights]))[:MAX_DETAILS]
                     selection = InsightSelection(summary_ids=summary, tension_id=selection.tension_id, detail_ids=details)
                     await event("validation_repair", dropped_ids=dropped)
                 narrative = render_selection(selection, insights, tensions)
@@ -470,7 +479,7 @@ async def run_research(request: ResearchRequest, settings: Settings, root: Path,
                 private_json(root / "work" / "validation-attempts" / f"{run_id}-selection-{attempt}.json", {"reason": reason, "content": content, "not_for_display": True})
                 if attempt == 0:
                     composer.append({"role": "assistant", "content": content if isinstance(content, str) else "{}"})
-                    composer.append({"role": "user", "content": "选择未通过校验：" + reason + "。summary_ids与detail_ids只能使用insights中的id：" + "、".join(insights) + "；tension_id只能使用：" + "、".join(tensions) + "。"})
+                    composer.append({"role": "user", "content": "选择未通过校验：" + reason + f"。summary_ids为1至3条，detail_ids为1至{MAX_DETAILS}条；summary_ids与detail_ids只能使用insights中的id：" + "、".join(insights) + "；tension_id只能使用：" + "、".join(tensions) + "。"})
         result = {"run_id": run_id, "question": request.question, "as_of": data.expected_day, "window": request.window,
                   "status": "completed_with_limits" if narrative else "facts_only", "created_at": datetime.now(SHANGHAI).isoformat(),
                   "narrative": narrative,
@@ -478,7 +487,7 @@ async def run_research(request: ResearchRequest, settings: Settings, root: Path,
                   **base, "evidence": list(data.evidence.values()),
                   "followups": [f"{name}最近60个交易日与沪深300相比表现如何？" for name in list(securities.values())[:1]] + ["最近有哪些表现较强的行业板块？", "最近20个交易日市场整体状态如何？"] if securities else
                       ["同一区间大小盘风格有什么差异？", "银行和半导体行业在同一区间表现如何？", "末日涨跌停分布有哪些风险信号？", "与上个月末结束的同长度历史区间相比有什么不同？"],
-                  "model": model, "skill_version": "market-state-v1", "events": events}
+                  "model": model, "skill_version": SKILL_VERSION, "events": events}
         result["analysis_protocol"] = "grounded-insight-selection-v1"
         result["intent"] = intent.model_dump()
         result["presentation"] = "sector_ranking" if intent.task == "sector_ranking" else "research"

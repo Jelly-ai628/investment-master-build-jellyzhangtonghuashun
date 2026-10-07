@@ -85,7 +85,25 @@ cloudflared tunnel --url http://127.0.0.1:8000
 | 候选观点与主要矛盾 | 代码生成 | 每条观点带推导数值和证据引用 |
 | 摘要与展开顺序 | DeepSeek 只按 ID 选择 | 不能新增或改写文字；选择不合格会重试一次，仍失败则只展示事实（`facts_only`） |
 
-研究方法改编自 `investment-masters-toolkit/` 的参考文档（见 `research-skills/*.md` 中的"改编来源"），不继承其中的买卖、仓位、目标价输出。
+### 研究技能（`research-skills/`）
+
+研究技能是运行时按问题加载给 DeepSeek 的系统提示，用于取数规划和观点选择（`research.py` 中的 `select_skills`）。每份技能写明适用问题、取数计划、怎么读证据、选择与排序、边界。
+
+| 技能 | 何时加载 | 借鉴自 `investment-masters-toolkit/` 的方法 |
+|---|---|---|
+| `research-protocol` | 每次研究 | `SKILL.md` 的标准流程（识别意图 → 精确确认代码、禁止凭记忆 → 确认交易日 → 计算 → 结论前置）、"复杂 Query 多维组合"路由、交互原则（不编造数据、一句话结论、定量与定性结合、最后总结待验证假设）；资金面"量级放进参照系""方向、连续性、加速度" |
+| `market-state` | 非个股问题 | `market-review` 的复盘顺序；`capital-flow-report` 的"量—质—势—位"，改用于成交额；`support-resistance` 的区间高低点与距离 |
+| `comparison` | 比较类问题 | `comparison` 的同口径多维对比；CANSLIM、PEG 只作为"需要哪些证据"的边界 |
+| `industry-context` | 行业问题 | `industry-chain`、`event-penetration` 的传导路径（价格、需求、成本）与替代解释 |
+| `history-context` | 历史对比 | `indicator-backtest` 的样本充足度与回测前提 |
+| `risk-context` | 风险与整体问题 | `capital-flow-report` 的量级与持续性；`max-pessimism`、`safety-margin` 的反证要求 |
+| `valuation-boundary` | 估值与个股问题 | `valuation` 的估值研究步骤（实体与时点 → 历史分位 → 相对估值 → 驱动）；`low-pe-high-div` 的价值陷阱提示 |
+| `event-context` | 事件与整体问题 | `event-price-in`、`info-analysis` 的事件确认与"是否已被定价"框架 |
+| `security-context` | 个股问题 | `SKILL.md` 的代码精确确认；`comparison`、`basic` 的完整个股诊断维度（用于标明未接入的部分） |
+
+其中两项方法由代码确定性实现，作为候选观点供 AI 选择：区间收盘高低点位置（`range_*`）和最近 5 日成交节奏（`turnover_trend`），见 `insights.py`。
+
+没有采用的内容：工具包的投顾人设、买入/持有/卖出结论、时机评分、目标价、止损位、支撑压力位建议、"帮你分析概率"、选股筛选名单，以及利好/利空条数计数。
 
 ## 数据来源与口径
 
@@ -120,7 +138,7 @@ cloudflared tunnel --url http://127.0.0.1:8000
 - [x] 源代码仓库：<https://github.com/Jelly-ai628/investment-master-build-jellyzhangtonghuashun>
 - [x] README 说明目标用户、产品与设计选择、AI 的角色、数据来源、启动方式、环境变量、已知边界及未做事项（本文件）。
 - [x] 主链路实际运行：市场状态框架、取数计划、工具调用、事实与判断区分（见测试说明中的真实运行记录）。
-- [x] 产品结果包含结论、证据、时点、置信度和状态切换条件，并支持继续研究风格、行业、个股、风险变量和历史阶段（真实验收 19/19，见测试说明）。
+- [x] 产品结果包含结论、证据、时点、置信度和状态切换条件，并支持继续研究风格、行业、个股、风险变量和历史阶段（真实验收：技能 v1 19/19；技能 v2 修正后复跑通过，见测试说明）。
 - [x] 关键结论可追溯到原始字段或原文，包含来源、时点、单位及统计口径。
 - [x] AI 使用与验证记录：[06_AI使用与验证记录](deliverables/06_AI使用与验证记录.md)。
 - [x] 测试说明：[05_测试说明](deliverables/05_测试说明.md)，覆盖主链路、数据缺失、接口失败、极端场景及合规边界，并记录实际结果。
@@ -139,6 +157,7 @@ cloudflared tunnel --url http://127.0.0.1:8000
 - [产品与技术实施规划](deliverables/01_产品与技术实施规划.md)、[工具包与数据源核查](deliverables/02_工具包与数据源核查.md)：规划与核查阶段记录。
 - [接入准备与验证记录](deliverables/03_接入准备与验证记录.md)、[iFinD 数据能力与质量验证](deliverables/04_iFinD数据能力与质量验证.md)：接入阶段的真实验证记录（保留当时的测试数量与结论）。
 - [测试说明](deliverables/05_测试说明.md)、[AI 使用与验证记录](deliverables/06_AI使用与验证记录.md)。
+- [DeepSeek 提示词说明](docs/deepseek-prompts.md)：三类模型请求的 system/user 提示、工具与校验规则。
 - [图表合同](docs/chart-contract.md)、[ECharts skill](echart/SKILL.md)。
 
 `investment-masters-toolkit/` 与其压缩包只是辅助参考材料，不属于交付范围；其中包含硬编码凭据等问题（见核查文档），不随源代码发布。

@@ -6,11 +6,15 @@ from .connections import ProbeError
 from .sector_ranking import ranking_answer
 
 
+# Every evidence kind can contribute a direction, a range and a caveat, so a full overview needs room for about ten.
+MAX_DETAILS = 10
+
+
 class InsightSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     summary_ids: list[str] = Field(min_length=1, max_length=3)
     tension_id: str
-    detail_ids: list[str] = Field(min_length=1, max_length=8)
+    detail_ids: list[str] = Field(min_length=1, max_length=MAX_DETAILS)
 
 
 def candidates(evidence: dict) -> tuple[dict, dict]:
@@ -33,6 +37,14 @@ def candidates(evidence: dict) -> tuple[dict, dict]:
         level = "前复权收盘价" if stock else "点位"
         add("index_" + str(index), f"{d['name']}在{d['start_date']}至{d['end_date']}的首末{level}变化为{d['window_return_pct']:+.2f}%" + (f"，区间最大回撤{d['max_drawdown_pct']:.2f}%" if stock else "") + f"；末日{level}" + ("、".join(relation) if relation else "暂无足够历史计算均线") + "。这些比较描述已发生的价格位置。",
             "个股行情" if stock else "行业研究" if d.get("instrument_type") == "industry" else "行情结构", [item["id"]], {"return_pct": d["window_return_pct"], "close": d["last_close"], "ma20": d.get("ma20"), "ma60": d.get("ma60")})
+        closes = [row["close"] for row in d.get("series", [])]
+        if len(closes) >= 2 and max(closes) > min(closes):
+            # Where the last close sits inside the window's closing range: describes the path, not support or resistance.
+            high, low, last = max(closes), min(closes), closes[-1]
+            position = (last - low) / (high - low) * 100
+            unit = "元（前复权）" if stock else "点"
+            add("range_" + str(index), f"{d['name']}在{d['start_date']}至{d['end_date']}的收盘{level}最低{low:.2f}{unit}、最高{high:.2f}{unit}；末日{last:.2f}{unit}位于这一区间自低到高的{position:.0f}%处，较区间最高收盘{(last / high - 1) * 100:+.2f}%，较最低收盘{(last / low - 1) * 100:+.2f}%。高低点按收盘计算，只描述已发生的位置，不是支撑位或压力位。",
+                "个股行情" if stock else "行业研究" if d.get("instrument_type") == "industry" else "行情结构", [item["id"]], {"low": low, "high": high, "last": last, "position_pct": position})
     stocks = [item for item in histories if item["data"].get("instrument_type") == "stock"]
     benchmark = next((item for item in histories if item["data"].get("code") == "000300.SH"), None)
     for index, item in enumerate(stocks):
@@ -72,6 +84,16 @@ def candidates(evidence: dict) -> tuple[dict, dict]:
             direction = "上升" if change > 0 else "下降" if change < 0 else "持平"
             add("turnover", f"{last['date']}成交额较前一个已覆盖交易日{direction}{abs(change):.2f}%，处于所覆盖{len(turnover)}个交易日中第{rank}低的位置。各日有效样本数有所不同；成交额仅反映交易活跃度。",
                 "流动性", [breadth["id"]], {"previous_date": previous["date"], "change_pct": change, "ascending_rank": rank, "sample_count": len(turnover)})
+            if len(turnover) >= 6 and sum(row["turnover_cny"] for row in turnover) > 0:
+                # Pace of activity: recent five-day average against the whole covered span, plus how many of those days expanded.
+                recent = turnover[-5:]
+                recent_avg = sum(row["turnover_cny"] for row in recent) / 5
+                overall_avg = sum(row["turnover_cny"] for row in turnover) / len(turnover)
+                expanded = sum(turnover[i]["turnover_cny"] > turnover[i - 1]["turnover_cny"] for i in range(len(turnover) - 5, len(turnover)))
+                counts = [row["valid_count"] for row in turnover if "valid_count" in row]
+                samples = f"各日有效样本数在{min(counts)}至{max(counts)}只之间，样本差异会影响比较；" if counts else ""
+                add("turnover_trend", f"最近5个已覆盖交易日（{recent[0]['date']}至{recent[-1]['date']}）全市场日均成交额{recent_avg / 1e8:.0f}亿元，是所覆盖{len(turnover)}个交易日日均{overall_avg / 1e8:.0f}亿元的{recent_avg / overall_avg * 100:.1f}%；这5天中有{expanded}天较前一日放大。{samples}这描述的是交易活跃度的节奏，不代表资金净流入。",
+                    "流动性", [breadth["id"]], {"recent_avg_cny": recent_avg, "overall_avg_cny": overall_avg, "expanded_days": expanded, "sample_count": len(turnover)})
             if histories:
                 tensions["activity_vs_price"] = {"id": "activity_vs_price", "text": f"区间指数表现与末日成交活跃度属于不同时间尺度。末日成交额较前一覆盖交易日{direction}，但不能凭一个交易日确认区间趋势已经改变；需要继续核对同口径参与度与价格表现。",
                     "evidence_ids": [breadth["id"]] + [item["id"] for item in histories]}
