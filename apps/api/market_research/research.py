@@ -210,9 +210,9 @@ async def run_research(request: ResearchRequest, settings: Settings, root: Path,
 
     if asks_for_prohibited_output(request.question):
         result = {"run_id": run_id, "question": request.question, "as_of": "未取数", "window": request.window, "status": "scope_guidance",
-                  "created_at": datetime.now(SHANGHAI).isoformat(),
+                  "presentation": "message", "created_at": datetime.now(SHANGHAI).isoformat(),
                   "narrative": {"summary": "这个产品用于理解市场状态、证据与不确定性，不能提供未来涨跌或具体操作结论。可以继续研究已发生的行情、参与度，以及哪些条件会改变当前判断。",
-                                "main_tension": "未来结果尚未发生，不能把研究观察转成确定结论。", "interpretations": []},
+                                "main_tension": "未来结果尚未发生，不能把研究观察转成确定结论。", "interpretations": [], "author": "rules"},
                   "facts": [], "evidence": [], "transition_conditions": [], "dimensions": [],
                   "confidence": {"level": "不适用", "scope": "未进行金融数据取数，不生成市场状态判断。", "reasons": []},
                   "uncertainties": ["本轮仅说明产品研究边界，没有生成行情或投资结论。"],

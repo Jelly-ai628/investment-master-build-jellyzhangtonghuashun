@@ -33,6 +33,8 @@ def test_boundary_route_does_not_invent_tools_or_require_keys(tmp_path):
     assert result["status"] == "scope_guidance"
     assert result["facts"] == [] and result["evidence"] == []
     assert result["model"] is None
+    # Rendered as a plain message, not as a research report with empty sections.
+    assert result["presentation"] == "message" and result["narrative"]["author"] == "rules"
 
 
 def stock_fixture(fetched, known):
